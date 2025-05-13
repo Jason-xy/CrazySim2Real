@@ -1,0 +1,33 @@
+# Simulator Configuration for Crazyflie Sweeper
+connection_type: "simulator"  # Use simulator instead of real hardware
+sim_host: "localhost"  # Simulator host address
+sim_port: 8000  # Simulator port
+
+# Common flight parameters
+hover_thrust: 39150
+takeoff_thrust_initial: 40631
+
+# Safety limits
+safety_max_roll_pitch_deg: 15.0
+safety_max_thrust: 48000
+safety_min_thrust_flight: 20000
+safety_radius_m: 2.5
+safety_max_height_m: 2.0
+
+# Test parameters
+step_test_amplitude_roll: 5.0
+step_test_amplitude_pitch: 5.0
+step_test_amplitude_thrust: 2000
+step_test_duration: 1.5
+
+impulse_amplitude_roll: 6.0
+impulse_amplitude_pitch: 6.0
+impulse_amplitude_thrust: 2500
+impulse_duration: 0.2
+
+sine_sweep_duration: 8.0
+sine_start_freq: 0.5
+sine_end_freq: 4.0
+sine_amplitude_roll: 3.0
+sine_amplitude_pitch: 3.0
+sine_amplitude_thrust: 1200 
