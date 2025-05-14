@@ -16,9 +16,9 @@ POSITION_CONTROLLER = {
 }
 
 ATTITUDE_CONTROLLER = {
-    "Krp_ang": [7.5, 7.5],  # Roll/pitch P gain
-    "Kdrp_ang": [0.05, 0.05],   # Roll/pitch D gain
-    "Kinv_ang_vel_tau": [20.0, 20.0, 5.0]  # Angular velocity inverse time constants
+    "Krp_ang": [15.0, 15.0],  # Roll/pitch P gain
+    "Kdrp_ang": [0.8, 0.8],   # Roll/pitch D gain
+    "Kinv_ang_vel_tau": [20.0, 20.0, 15.0]  # Angular velocity inverse time constants
 }
 
 # Physics parameters
