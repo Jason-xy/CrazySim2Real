@@ -1,18 +1,23 @@
 name: "Impulse Response Tests"
-description: "Impulse response tests for roll, pitch, and thrust axes."
+description: "Impulse response tests for roll, pitch, yaw rate, and thrust axes."
 tests:
   # Impulse tests
   - type: "impulse"
     channel: "roll"
     amplitude: 5.0  # degrees
     duration: 0.5   # seconds
-  
+
   - type: "impulse"
     channel: "pitch"
     amplitude: 5.0  # degrees
     duration: 0.5   # seconds
-  
+
+  - type: "impulse"
+    channel: "yaw"
+    amplitude: 30.0  # deg/s yaw rate
+    duration: 0.5   # seconds
+
   - type: "impulse"
     channel: "thrust"
     amplitude: 1000 # raw thrust units
-    duration: 0.5   # seconds 
+    duration: 0.5   # seconds

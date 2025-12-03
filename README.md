@@ -71,10 +71,10 @@ The simulator runs in a Docker container with NVIDIA Isaac Lab:
 
 ```bash
 # Start the simulator
-./scripts/start.sh /isaaclab/CrazySim2Real/crazyflie_sim/run.py
+./scripts/start.sh /workspace/isaaclab/CrazySim2Real/crazyflie_sim/run.py
 
 # Alternative with custom parameters
-./scripts/start.sh /isaaclab/CrazySim2Real/crazyflie_sim/run.py --port 8000
+./scripts/start.sh /workspace/isaaclab/CrazySim2Real/crazyflie_sim/run.py --port 8000
 ```
 
 This will start a Docker container with the Isaac Lab environment and launch the Crazyflie simulator inside it. The simulator exposes an HTTP API that the benchmarking framework can connect to.
@@ -89,10 +89,10 @@ cd crazyflie_benchmark
 python main.py --list-tests
 
 # Run a benchmark in simulation
-python main.py --config config/simulator_config.yaml --test-plan test_plans/step_tests.yaml
+python main.py --config config/simulator_config.yaml --test-plan step_tests.yaml
 
 # Run a benchmark on real hardware
-python main.py --config config/hardware_config.yaml --test-plan test_plans/step_tests.yaml
+python main.py --config config/hardware_config.yaml --test-plan step_tests.yaml
 ```
 
 ## Test Plans
@@ -112,7 +112,7 @@ tests:
     channel: "roll"
     amplitude: 5.0  # degrees
     duration: 1.5   # seconds
-  
+
   - type: "step"
     channel: "pitch"
     amplitude: 5.0  # degrees

@@ -5,32 +5,33 @@ import threading
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import deque
+
 from isaaclab.utils.math import euler_xyz_from_quat
 
 def quat_derivative(q, omega):
     """
     Compute the derivative of quaternion q given body rates omega.
-    
+
     Args:
         q: Quaternion tensor of shape (batch_size, 4) in [w, x, y, z] format
         omega: Angular velocity tensor of shape (batch_size, 3) in body frame
-    
+
     Returns:
         dq: Quaternion derivative tensor of shape (batch_size, 4)
     """
     # Extract quaternion components
     qw, qx, qy, qz = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-    
+
     # Extract angular velocity components
     wx, wy, wz = omega[:, 0], omega[:, 1], omega[:, 2]
-    
+
     # Compute quaternion derivative
     dqw = -0.5 * ( qx*wx + qy*wy + qz*wz)
     dqx =  0.5 * ( qw*wx +  wy*qz -  wz*qy)
     dqy =  0.5 * ( qw*wy +  wz*qx -  wx*qz)
     dqz =  0.5 * ( qw*wz +  wx*qy -  wy*qx)
 
-    
+
     return torch.stack([dqw, dqx, dqy, dqz], dim=1)
 
 class QuadrotorDynamics:
@@ -46,7 +47,7 @@ class QuadrotorDynamics:
                  device: torch.device = torch.device("cpu")):
         self.device = device
         self.num_envs = num_envs
-        
+
         # Initialize mass with proper batch dimension
         if mass is None:
             self.mass_ = torch.full((num_envs,), 0.027, device=self.device)
@@ -54,7 +55,7 @@ class QuadrotorDynamics:
             self.mass_ = mass.to(self.device)
             if self.mass_.dim() == 0:  # scalar
                 self.mass_ = self.mass_.expand(num_envs)
-                
+
         # Initialize arm length with proper batch dimension
         if arm_l is None:
             self.arm_l_ = torch.full((num_envs,), 0.046, device=self.device)
@@ -62,7 +63,7 @@ class QuadrotorDynamics:
             self.arm_l_ = arm_l.to(self.device)
             if self.arm_l_.dim() == 0:  # scalar
                 self.arm_l_ = self.arm_l_.expand(num_envs)
-        
+
         # Initialize inertia with proper batch dimension
         default_inertia = torch.tensor([9.19e-6, 9.19e-6, 22.8e-6], device=self.device)
         if inertia is None:
@@ -79,7 +80,7 @@ class QuadrotorDynamics:
         kv_rpm_per_v = 10000.0
         kt = 60.0 / (2 * math.pi * kv_rpm_per_v)
         self.motor_tau_inv_ = torch.full((num_envs,), 1.0 / kt, device=self.device)
-        
+
         rpm_max, rpm_min = 24000.0, 1200.0
         self.motor_omega_max_ = torch.full((num_envs,), rpm_max * math.pi / 30, device=self.device)
         self.motor_omega_min_ = torch.full((num_envs,), rpm_min * math.pi / 30, device=self.device)
@@ -87,7 +88,7 @@ class QuadrotorDynamics:
         # Thrust map coefficients - directly with batch dimension
         self.thrust_map_ = torch.tensor([9.96063125e-08, -2.55003087e-05, 5.84422691e-03],
                                       device=self.device).expand(num_envs, 3)
-        
+
         # Drag-torque ratio
         self.kappa_ = torch.full((num_envs,), 0.005964552, device=self.device)
 
@@ -96,7 +97,7 @@ class QuadrotorDynamics:
         a, b, c = self.thrust_map_[:, 0], self.thrust_map_[:, 1], self.thrust_map_[:, 2]
         w = self.motor_omega_max_
         self.thrust_max_ = a * (w ** 2) + b * w + c
-        self.thrust_max_ = 1.5 * self.thrust_max_  # 50% headroom for custom motor
+        self.thrust_max_ = 1.358 * self.thrust_max_  # 50% headroom for custom motor
 
         # Angular velocity limits
         self.omega_max_ = torch.full((num_envs, 3), 6.0, device=self.device)
@@ -199,16 +200,15 @@ class Quadrotor:
              'yaw_rate' (n,), 'thrust' (n,)
     Outputs: body-frame force and torque (n,3) each.
     """
-    def __init__(self, 
-             dynamics: QuadrotorDynamics = None, 
-             num_envs: int = 1, 
+    def __init__(self,
+             dynamics: QuadrotorDynamics = None,
+             num_envs: int = 1,
              device=torch.device("cpu"),
-             Krp_ang=None, 
-             Kdrp_ang=None, 
-             Kinv_ang_vel_tau=None, 
-             debug_viz=False, 
-             viz_port=8000,
-             derivative_filter_alpha=0.8):  # New parameter for derivative filter
+             Krp_ang=None,
+             Kdrp_ang=None,
+             Kinv_ang_vel_tau=None,
+             debug_viz=False,
+             viz_port=8000):
         self.dynamics = dynamics if dynamics is not None else QuadrotorDynamics(num_envs=num_envs, device=device)
         self.device = device
         # Get batch size consistently
@@ -228,7 +228,7 @@ class Quadrotor:
                     self.Krp_ang_ = Krp_ang.to(self.device)
             else:
                 raise ValueError(f"Krp_ang must be a list, tuple or tensor, got {type(Krp_ang)}")
-            
+
         # Derivative gains for roll and pitch control
         if Kdrp_ang is None:
             self.Kdrp_ang_ = torch.full((self.num_envs, 2), 0.2, device=self.device)
@@ -242,7 +242,7 @@ class Quadrotor:
                     self.Kdrp_ang_ = Kdrp_ang.to(self.device)
             else:
                 raise ValueError(f"Kdrp_ang must be a list, tuple or tensor, got {type(Kdrp_ang)}")
-            
+
         # Inverse time constants for angular velocity control
         if Kinv_ang_vel_tau is None:
             self.Kinv_ang_vel_tau_ = torch.tensor([25.0, 25.0, 15.0], device=self.device).expand(self.num_envs, 3)
@@ -256,18 +256,11 @@ class Quadrotor:
                     self.Kinv_ang_vel_tau_ = Kinv_ang_vel_tau.to(self.device)
             else:
                 raise ValueError(f"Kinv_ang_vel_tau must be a list, tuple or tensor, got {type(Kinv_ang_vel_tau)}")
-            
+
         self.gravity = torch.tensor([0.0, 0.0, 9.81], device=self.device)
         self.alloc_matrix_ = self.dynamics.getAllocationMatrix()
         self.alloc_matrix_pinv_ = torch.linalg.pinv(self.alloc_matrix_)
         print(f"Quadrotor controller initialized with batch size: {self.num_envs}")
-              
-        # Initialize derivative filter state and coefficient
-        self.derivative_filter_alpha = derivative_filter_alpha
-        self.prev_roll_err = torch.zeros(self.num_envs, device=self.device)
-        self.prev_pitch_err = torch.zeros(self.num_envs, device=self.device)
-        self.prev_d_roll = torch.zeros(self.num_envs, device=self.device)
-        self.prev_d_pitch = torch.zeros(self.num_envs, device=self.device)
 
         # Debug visualization settings
         self.debug_viz = debug_viz
@@ -310,13 +303,13 @@ class Quadrotor:
                 else:
                     self.send_response(404)
                     self.end_headers()
-                    
+
             def do_POST(self):
                 if self.path == '/update_params':
                     content_length = int(self.headers['Content-Length'])
                     post_data = self.rfile.read(content_length).decode('utf-8')
                     params = json.loads(post_data)
-                    
+
                     # Update controller parameters with proper batch dimension
                     if 'Krp_ang' in params:
                         values = torch.tensor(params['Krp_ang'], device=controller.device)
@@ -325,7 +318,7 @@ class Quadrotor:
                             controller.Krp_ang_ = values.expand(controller.num_envs, values.size(0))
                         else:
                             controller.Krp_ang_ = values
-                            
+
                     if 'Kdrp_ang' in params:
                         values = torch.tensor(params['Kdrp_ang'], device=controller.device)
                         # Ensure proper shape and expand to match num_envs
@@ -333,7 +326,7 @@ class Quadrotor:
                             controller.Kdrp_ang_ = values.expand(controller.num_envs, values.size(0))
                         else:
                             controller.Kdrp_ang_ = values
-                            
+
                     if 'Kinv_ang_vel_tau' in params:
                         values = torch.tensor(params['Kinv_ang_vel_tau'], device=controller.device)
                         # Ensure proper shape and expand to match num_envs
@@ -341,14 +334,14 @@ class Quadrotor:
                             controller.Kinv_ang_vel_tau_ = values.expand(controller.num_envs, values.size(0))
                         else:
                             controller.Kinv_ang_vel_tau_ = values
-                    
+
                     # Update the viz_data with new parameters
                     controller.viz_data['params'] = {
                         'Krp_ang': controller.Krp_ang_.tolist(),
                         'Kdrp_ang': controller.Kdrp_ang_.tolist(),
                         'Kinv_ang_vel_tau': controller.Kinv_ang_vel_tau_.tolist(),
                     }
-                    
+
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -369,15 +362,8 @@ class Quadrotor:
         print(f"Controller visualization server started on port {port}")
 
     def reset_error_history(self, batch_size=None):
-        """Reset the error history used for derivative calculations"""
-        if batch_size is None and self.prev_roll_err is not None:
-            batch_size = self.prev_roll_err.shape[0]
-        
-        if batch_size is not None:
-            self.prev_roll_err = torch.zeros(batch_size, device=self.device)
-            self.prev_pitch_err = torch.zeros(batch_size, device=self.device)
-            self.prev_d_roll = torch.zeros(batch_size, device=self.device)  # Reset derivative filters
-            self.prev_d_pitch = torch.zeros(batch_size, device=self.device)  # Reset derivative filters
+        """Reset method kept for backward compatibility - no longer needed"""
+        pass
 
     def compute_control(self, state: torch.Tensor, cmd: torch.Tensor, dt: float = 0.005):
         """
@@ -392,11 +378,6 @@ class Quadrotor:
         """
         batch = state.shape[0]
 
-        # Reset error history if uninitialized or batch size changed
-        if (self.prev_roll_err is None or self.prev_pitch_err is None or
-            self.prev_roll_err.shape[0] != batch):
-            self.reset_error_history(batch)
-
         # Unpack current orientation and angular velocity
         roll_cur, pitch_cur, _ = euler_xyz_from_quat(state[:, 3:7])
         omega_cur = state[:, 10:13]
@@ -404,9 +385,9 @@ class Quadrotor:
         # Map normalized commands to physical setpoints
         roll_des     = cmd[:,0] * (math.pi/6)
         pitch_des    = cmd[:,1] * (math.pi/6)
-        yaw_rate_des = cmd[:,2] * (math.pi/6)
+        yaw_rate_des = cmd[:,2] * (math.pi/1.5)
         F_des        = cmd[:,3] * self.dynamics.thrust_max_
-        
+
         # --- NEW: Gain scheduling based on thrust command ---
         # Scale gains based on thrust command (higher at high thrust, lower at low thrust)
         thrust_norm = cmd[:,3]  # Already normalized in [0.0, 1.0]
@@ -420,25 +401,11 @@ class Quadrotor:
         # Compute angle errors in [-π, π]
         roll_err  = ((roll_des - roll_cur + math.pi) % (2*math.pi)) - math.pi
         pitch_err = ((pitch_des - pitch_cur + math.pi) % (2*math.pi)) - math.pi
-        
-        # Derivative of error (raw)
-        d_roll_raw = (roll_err - self.prev_roll_err) / dt
-        d_pitch_raw = (pitch_err - self.prev_pitch_err) / dt
-        
-        # --- NEW: Apply low-pass filter to derivatives ---
-        alpha = self.derivative_filter_alpha
-        d_roll = alpha * self.prev_d_roll + (1 - alpha) * d_roll_raw
-        d_pitch = alpha * self.prev_d_pitch + (1 - alpha) * d_pitch_raw
-        
-        # Update history for next iteration
-        self.prev_roll_err = roll_err.clone()
-        self.prev_pitch_err = pitch_err.clone()
-        self.prev_d_roll = d_roll.clone()
-        self.prev_d_pitch = d_pitch.clone()
 
-        # PD to angular rates - using scaled gains from gain scheduling
-        roll_rate_des = Krp_scaled[:, 0] * roll_err + Kdrp_scaled[:, 0] * d_roll
-        pitch_rate_des = Krp_scaled[:, 1] * pitch_err + Kdrp_scaled[:, 1] * d_pitch
+        # Firmware-style PD: P·error - D·measurement (no derivative kick)
+        # Using angular velocity measurement directly instead of error differentiation
+        roll_rate_des = Krp_scaled[:, 0] * roll_err - Kdrp_scaled[:, 0] * omega_cur[:, 0]
+        pitch_rate_des = Krp_scaled[:, 1] * pitch_err - Kdrp_scaled[:, 1] * omega_cur[:, 1]
 
         # --- 2. Yaw P control ---
         # Stack desired angular velocities
@@ -458,7 +425,7 @@ class Quadrotor:
         # --- 4. Baseline-plus-differential thrust allocation ---
         # Step 1: Compute baseline thrust (equal for all motors)
         T0 = F_des / 4.0  # Shape: [batch]
-        
+
         # --- NEW: Dynamic calculation of differential thrust bounds ---
         # Calculate per-motor limits rather than using a single delta_T_max value
         T_motor_max = self.dynamics.thrust_max_ / 4.0
@@ -472,23 +439,23 @@ class Quadrotor:
             torch.zeros_like(F_des).unsqueeze(1),  # Zero collective thrust
             tau_des  # Keep torque components
         ], dim=1)
-        
+
         # Compute differential thrust components
         delta_T = torch.bmm(self.alloc_matrix_pinv_, torque_only_wrench.unsqueeze(-1)).squeeze(-1)
-        
+
         # Create masks for positive and negative values
         pos_mask = delta_T > 0
         neg_mask = delta_T < 0
-        
+
         # Apply appropriate limits based on direction
-        scale_factors_pos = torch.where(pos_mask, delta_T / delta_T_max_pos.unsqueeze(1), 
+        scale_factors_pos = torch.where(pos_mask, delta_T / delta_T_max_pos.unsqueeze(1),
                                       torch.zeros_like(delta_T))
-        scale_factors_neg = torch.where(neg_mask, -delta_T / delta_T_max_neg.unsqueeze(1), 
+        scale_factors_neg = torch.where(neg_mask, -delta_T / delta_T_max_neg.unsqueeze(1),
                                       torch.zeros_like(delta_T))
-        
+
         # Find maximum scaling factor per batch
         max_scale_per_batch, _ = torch.max(torch.maximum(scale_factors_pos, scale_factors_neg), dim=1, keepdim=True)
-        
+
         # Apply scaling only when limits are exceeded
         delta_T_scaling = torch.where(
             max_scale_per_batch > 1.0,
@@ -496,37 +463,37 @@ class Quadrotor:
             torch.ones_like(max_scale_per_batch)
         )
         delta_T = delta_T * delta_T_scaling
-        
+
         # Step 3: Combine baseline and differential thrust
         motor_thrusts = T0.unsqueeze(1) + delta_T  # Shape: [batch, 4]
-        
+
         # Step 4: Enforce non-negative thrust
         motor_thrusts = torch.clamp(motor_thrusts, min=0.0)
-        
+
         # Special case: When throttle command is zero, force all motors to be exactly zero
         # This ensures no lift with zero throttle command
         zero_throttle = (cmd[:, 3] == 0.0).unsqueeze(1)
         motor_thrusts = torch.where(zero_throttle, torch.zeros_like(motor_thrusts), motor_thrusts)
-        
+
         # Step 5: Limit per-motor maximum thrust using uniform scaling
         thrust_max_expanded = self.dynamics.thrust_max_.unsqueeze(1).expand_as(motor_thrusts)
         scale_factors = motor_thrusts / thrust_max_expanded
         max_scale_per_batch, _ = torch.max(scale_factors, dim=1, keepdim=True)
-        
+
         # Apply uniform scaling where needed (only when max_scale > 1.0)
         scaling = torch.where(
             max_scale_per_batch > 1.0,
             1.0 / max_scale_per_batch,
             torch.ones_like(max_scale_per_batch)
         )
-        
+
         # Scale all motors uniformly
         motor_thrusts = motor_thrusts * scaling
-        
+
         # Step 6: Reconstruct resulting force & torque
         # Map motor thrusts back to wrench
         alloc = torch.bmm(self.alloc_matrix_, motor_thrusts.unsqueeze(-1)).squeeze(-1)
-        
+
         # Extract force and torque components
         force = torch.zeros((batch, 3), device=self.device)
         force[:, 2] = alloc[:, 0]  # Only Z-axis thrust in body frame

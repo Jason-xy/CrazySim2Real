@@ -16,9 +16,9 @@ POSITION_CONTROLLER = {
 }
 
 ATTITUDE_CONTROLLER = {
-    "Krp_ang": [15.0, 15.0],  # Roll/pitch P gain
-    "Kdrp_ang": [0.8, 0.8],   # Roll/pitch D gain
-    "Kinv_ang_vel_tau": [20.0, 20.0, 15.0]  # Angular velocity inverse time constants
+    "Krp_ang": [20.0, 20.0],  # Roll/pitch P gain
+    "Kdrp_ang": [0.5, 0.5],   # Roll/pitch D gain
+    "Kinv_ang_vel_tau": [20.0, 20.0, 15.0]
 }
 
 # Physics parameters
@@ -40,4 +40,4 @@ LOGGING = {
     "level": "INFO",  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     "format": "[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
     "file": "crazyflie_sim.log"
-} 
+}

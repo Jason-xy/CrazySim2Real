@@ -1,18 +1,23 @@
 name: "Sine Sweep Tests"
-description: "Sine sweep tests for roll, pitch, and thrust axes."
+description: "Sine sweep tests for roll, pitch, yaw rate, and thrust axes."
 tests:
   # Sine sweep tests
   - type: "sine_sweep"
     channel: "roll"
     amplitude: 5.0  # degrees
     duration: 6.0   # seconds
-  
+
   - type: "sine_sweep"
     channel: "pitch"
     amplitude: 5.0  # degrees
     duration: 6.0   # seconds
-  
+
+  - type: "sine_sweep"
+    channel: "yaw"
+    amplitude: 30.0  # deg/s yaw rate
+    duration: 6.0   # seconds
+
   - type: "sine_sweep"
     channel: "thrust"
     amplitude: 1000  # raw thrust units
-    duration: 6.0   # seconds 
+    duration: 6.0   # seconds
