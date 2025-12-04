@@ -1,600 +1,571 @@
 """
-SimulationManager class responsible for running the simulation and handling controllers.
+SimulationManager: Orchestrates IsaacLab simulation with CF2.1 BL controller.
+
+Provides:
+- Physics simulation via IsaacLab
+- CF firmware-compatible controller
+- Thread-safe state access
+- Command queuing (position, velocity, attitude)
 """
 import logging
 import threading
 import queue
 import time
-import json
 import math
-from typing import Dict, Any, Tuple, Union
+from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
+from enum import IntEnum
 
 import torch
 import numpy as np
-from isaaclab.app import AppLauncher
 from isaaclab.sim import SimulationContext
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
-from isaaclab.sim.schemas import MassPropertiesCfg, modify_mass_properties
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaacsim.core.utils.prims import set_prim_property
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaacsim.core.utils.stage import add_reference_to_stage
-from isaaclab.utils.math import matrix_from_quat
-
-# Use absolute imports for controllers
-from crazyflie_sim.controllers.base import BaseController
-from crazyflie_sim.controllers.pid_position import PIDPositionController
-from crazyflie_sim.controllers.attitude_wrapper import AttitudeControllerWrapper
 from isaaclab_assets import CRAZYFLIE_CFG
 
-# Define the drone state dataclass
+from crazyflie_sim.controllers.cf_controller import (
+    CrazyflieController,
+    ControlMode,
+    config as cf_config,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class CommandType(IntEnum):
+    """Command types for the simulation."""
+    POSITION = 0
+    VELOCITY = 1
+    ATTITUDE = 2
+
+
 @dataclass
 class DroneState:
-    """Thread-safe dataclass for storing drone state."""
+    """Thread-safe dataclass for drone state."""
     position: Dict[str, float] = None
     velocity: Dict[str, float] = None
-    orientation: Dict[str, float] = None
-    angular_velocity: Dict[str, float] = None
+    orientation: Dict[str, float] = None  # roll, pitch, yaw in degrees
+    angular_velocity: Dict[str, float] = None  # deg/s
     timestamp: float = 0.0
 
     def __post_init__(self):
-        """Initialize default values."""
         if self.position is None:
             self.position = {"x": 0.0, "y": 0.0, "z": 0.0}
         if self.velocity is None:
             self.velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
         if self.orientation is None:
-            # Using Euler angles (roll, pitch, yaw) instead of quaternion
             self.orientation = {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}
         if self.angular_velocity is None:
             self.angular_velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
 
-logger = logging.getLogger(__name__)
 
 class SimulationManager:
     """
-    Manages the simulation loop and controllers for the Crazyflie simulator.
+    Manages IsaacLab simulation with CF2.1 BL firmware-compatible controller.
+
+    The controller matches the real Crazyflie 2.1 Brushless firmware:
+    - Cascaded PID (position -> velocity -> attitude -> rate)
+    - Motor mixing with attitude priority
+    - Same default gains as firmware
     """
 
-    def __init__(self, simulation_app, dt: float,
-                 position_controller_params: Dict[str, Any],
-                 attitude_controller_params: Dict[str, Any],
-                 physics_params: Dict[str, Any]):
+    def __init__(
+        self,
+        simulation_app,
+        dt: float = 0.01,
+        mass: float = cf_config.CF_MASS,
+        arm_length: float = cf_config.ARM_LENGTH,
+        inertia: tuple = (cf_config.INERTIA_XX, cf_config.INERTIA_YY, cf_config.INERTIA_ZZ),
+    ):
         """
-        Initialize the simulation manager.
+        Initialize simulation manager.
 
         Args:
-            simulation_app: Application instance from AppLauncher
-            dt: Simulation time step in seconds
-            position_controller_params: Parameters for the position controller
-            attitude_controller_params: Parameters for the attitude controller
-            physics_params: Parameters for the physics simulation
+            simulation_app: IsaacLab application instance
+            dt: Simulation time step (seconds)
+            mass: Drone mass (kg) - default CF2.1 BL
+            arm_length: Motor arm length (m) - default CF2.1 BL
+            inertia: Inertia tensor diagonal (kg*m^2)
         """
         self.simulation_app = simulation_app
         self.dt = dt
-        self.physics_params = physics_params
+        self.mass = mass
+        self.arm_length = arm_length
+        self.inertia = inertia
 
-        # Initialize state
+        # State and threading
         self.state = DroneState()
         self.state_lock = threading.Lock()
+        self.cmd_queue = queue.Queue()
 
-        # Command queues
-        self.position_cmd_queue = queue.Queue()
-        self.attitude_cmd_queue = queue.Queue()
 
-        # Initialize current command
-        self.current_position_cmd = {"x": 0.0, "y": 0.0, "z": 0.0}
-        self.current_attitude_cmd = {"roll": 0.0, "pitch": 0.0, "yaw_rate": 0.0, "thrust": 0.5}
+        # Current setpoints
+        self.current_cmd_type = CommandType.ATTITUDE
+        self.position_setpoint = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+        self.velocity_setpoint = {"vx": 0.0, "vy": 0.0, "vz": 0.0, "yaw_rate": 0.0}
+        self.attitude_setpoint = {"roll": 0.0, "pitch": 0.0, "yaw_rate": 0.0, "thrust": 0.0}
 
-        # Setup simulation and controllers
+        # Device
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        # Setup simulation and controller
         self._setup_simulation()
-        self._setup_controllers(position_controller_params, attitude_controller_params)
+        self._setup_controller()
 
-        logger.info("SimulationManager initialized with dt={dt:.3f}s")
+        logger.info(f"SimulationManager initialized: dt={dt}s, mass={mass}kg, device={self.device}")
 
     def _setup_simulation(self):
-        """Set up the simulation environment and robot."""
-        try:
-            # Initialize simulation
-            self.sim = SimulationContext(sim_utils.SimulationCfg(dt=self.dt))
+        """Initialize IsaacLab simulation environment."""
+        self.sim = SimulationContext(sim_utils.SimulationCfg(dt=self.dt))
 
-            # Create ground plane
-            ground_path = f"{ISAAC_NUCLEUS_DIR}/Environments/Grid/default_environment.usd"
-            prim_path = "/World/Environment/Ground"
-            add_reference_to_stage(ground_path, prim_path)
+        # Ground plane
+        ground_path = f"{ISAAC_NUCLEUS_DIR}/Environments/Grid/default_environment.usd"
+        add_reference_to_stage(ground_path, "/World/Environment/Ground")
 
-            # Setup robot
-            robot_cfg = CRAZYFLIE_CFG.replace(prim_path="/World/Robot")
-            self.robot = Articulation(robot_cfg)
+        # Robot
+        robot_cfg = CRAZYFLIE_CFG.replace(prim_path="/World/Robot")
+        self.robot = Articulation(robot_cfg)
 
-            # Apply physics parameters
-            mass = self.physics_params.get("mass", 0.041)
-            modify_mass_properties(
-                "/World/Robot/body",
-                MassPropertiesCfg(mass=mass)
+        # Body frame coordinate axes visualization
+        # Scale appropriate for Crazyflie (arm length ~5cm)
+        frame_scale = 0.08  # 8cm axes for visibility
+        self.frame_marker = VisualizationMarkers(
+            VisualizationMarkersCfg(
+                prim_path="/World/Visuals/BodyFrame",
+                markers={
+                    "frame": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                        scale=(frame_scale, frame_scale, frame_scale),
+                    )
+                }
             )
+        )
 
-            # Set inertia matrix
-            inertia = self.physics_params.get("inertia", [1.3615e-5, 1.3615e-5, 3.257e-5])
-            diag_inertia = torch.tensor(inertia, device="cpu")
-            set_prim_property("/World/Robot/body", "physics:diagonalInertia",
-                            (diag_inertia[0], diag_inertia[1], diag_inertia[2]))
+        # Apply physics parameters before reset
+        set_prim_property("/World/Robot/body", "physics:mass", self.mass)
+        set_prim_property("/World/Robot/body", "physics:diagonalInertia", self.inertia)
+        logger.info(f"Physics parameters set: mass={self.mass}kg, inertia={self.inertia}")
 
-            # Reset simulation
-            self.sim.reset()
+        # Reset and initialize
+        self.sim.reset()
 
-            # Initialize robot state
-            joint_pos, joint_vel = self.robot.data.default_joint_pos, self.robot.data.default_joint_vel
-            self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
+        joint_pos, joint_vel = self.robot.data.default_joint_pos, self.robot.data.default_joint_vel
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-            # Set initial position above ground
-            default_root_state = self.robot.data.default_root_state.clone()
-            default_root_state[:, 2] = 0.1  # Set height to 10cm
-            self.robot.write_root_pose_to_sim(default_root_state[:, :7])
-            self.robot.write_root_velocity_to_sim(default_root_state[:, 7:])
+        # Start at 10cm above ground
+        default_root = self.robot.data.default_root_state.clone()
+        default_root[:, 2] = 0.1
+        self.robot.write_root_pose_to_sim(default_root[:, :7])
+        self.robot.write_root_velocity_to_sim(default_root[:, 7:])
 
-            # Set visibility
-            set_prim_property("/World/Robot", "visibility", "visible")
+        set_prim_property("/World/Robot", "visibility", "visible")
+        logger.info("Simulation environment initialized")
 
-            logger.info("Simulation setup completed")
-        except Exception as e:
-            logger.error(f"Error in simulation setup: {e}")
-            raise
+    def _setup_controller(self):
+        """Initialize CF firmware-compatible controller."""
+        self.controller = CrazyflieController(
+            num_envs=1,
+            device=self.device,
+            attitude_dt=self.dt,  # Use sim dt for both loops in simulation
+            position_dt=self.dt,
+        )
+        logger.info("Controller initialized with CF2.1 BL parameters")
 
-    def _setup_controllers(self, position_params: Dict[str, Any], attitude_params: Dict[str, Any]):
-        """Set up the controllers."""
-        try:
-            # Initialize position controller
-            self.position_controller = PIDPositionController(
-                kp=position_params.get("Kp", {"x": 1.0, "y": 1.0, "z": 1.0}),
-                ki=position_params.get("Ki", {"x": 0.0, "y": 0.0, "z": 0.1}),
-                kd=position_params.get("Kd", {"x": 0.1, "y": 0.1, "z": 0.1}),
-                max_thrust=position_params.get("max_thrust", 0.6),
-                min_thrust=position_params.get("min_thrust", 0.0)
-            )
-
-            # Initialize attitude controller
-            self.attitude_controller = AttitudeControllerWrapper(
-                mass=self.physics_params.get("mass", 0.041),
-                inertia=self.physics_params.get("inertia", [1.3615e-5, 1.3615e-5, 3.257e-5]),
-                arm_length=self.physics_params.get("arm_length", 0.046),
-                krp_ang=attitude_params.get("Krp_ang", [10.0, 10.0]),
-                kdrp_ang=attitude_params.get("Kdrp_ang", [0.1, 0.1]),
-                kinv_ang_vel_tau=attitude_params.get("Kinv_ang_vel_tau", [35.0, 35.0, 15.0])
-            )
-
-            # Current controller mode
-            self.control_mode = "attitude"  # "position" or "attitude"
-
-            logger.info("Controllers initialized")
-        except Exception as e:
-            logger.error(f"Error in controller setup: {e}")
-            raise
-
-    def step(self):
-        """Perform a single simulation step.
+    def step(self) -> bool:
+        """
+        Execute one simulation step.
 
         Returns:
-            bool: True if simulation should continue, False if it should stop
+            True if simulation should continue, False to stop
         """
-        try:
-            # Check if simulation app is still running
-            if not self.simulation_app.is_running():
-                logger.warning("Simulation app is no longer running")
-                return False
+        if not self.simulation_app.is_running():
+            return False
 
-            # Check if robot and sim are valid
-            if not hasattr(self, 'robot') or self.robot is None or not hasattr(self, 'sim') or self.sim is None:
-                logger.error("Robot or simulation object is invalid")
-                # Attempt to reinitialize
-                try:
-                    self._setup_simulation()
-                    self._setup_controllers(
-                        {"Kp": self.position_controller.kp, "Ki": self.position_controller.ki, "Kd": self.position_controller.kd},
-                        {}  # Use default attitude controller parameters
-                    )
-                    logger.info("Successfully reinitialized simulation and controllers")
-                except Exception as reinit_e:
-                    logger.error(f"Failed to reinitialize simulation: {reinit_e}")
-                    return False
+        self._update_state()
+        self._process_commands()
+        force, torque = self._compute_control()
+        self._apply_control(force, torque)
+        self._update_frame_marker()
+        self.sim.step()
 
-            # Update state - wrapped in try/except to continue even if this fails
-            try:
-                self._update_state()
-            except Exception as e:
-                logger.error(f"Error in _update_state: {e}")
 
-            # Process commands - wrapped in try/except to continue even if this fails
-            try:
-                self._process_commands()
-            except Exception as e:
-                logger.error(f"Error in _process_commands: {e}")
-
-            # Compute control
-            try:
-                force, torque = self._compute_control()
-                # print(f"cmd: {self.current_attitude_cmd}")
-                # print(f"force: {force}, torque: {torque}")
-            except Exception as e:
-                logger.error(f"Error in _compute_control: {e}")
-                # Default to zero force/torque
-                force = torch.zeros(1, 3, device=self.attitude_controller.device)
-                torque = torch.zeros(1, 3, device=self.attitude_controller.device)
-
-            # Apply control
-            try:
-                self._apply_control(force, torque)
-            except Exception as e:
-                logger.error(f"Error in _apply_control: {e}")
-
-            # Step simulation
-            try:
-                self.sim.step()
-            except Exception as e:
-                logger.error(f"Error in sim.step(): {e}")
-                # Try to reset if stepping fails
-                try:
-                    self.sim.reset()
-                except Exception as reset_e:
-                    logger.error(f"Error resetting simulation after step failure: {reset_e}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Unhandled error in simulation step: {e}")
-            return True  # Continue running despite errors
+        return True
 
     def _update_state(self):
-        """
-        Update the state dataclass with current robot state.
+        """Read state from simulation."""
+        self.robot.update(self.dt)
+        root_state = self.robot.data.root_state_w
 
-        All angles (roll, pitch, yaw) in the orientation field are converted to degrees
-        for consistency with the real Crazyflie's log data.
-        All angular velocities are stored in radians/s internally, but will be converted
-        to degrees/s in the get_state method for the API.
-        """
-        def normalize_angle(angle: float):
-            return (angle + math.pi) % (2 * math.pi) - math.pi
+        # Position
+        pos = {
+            "x": root_state[0, 0].item(),
+            "y": root_state[0, 1].item(),
+            "z": root_state[0, 2].item(),
+        }
 
-        try:
-            # Check if robot is valid
-            if not hasattr(self, 'robot') or self.robot is None:
-                logger.error("Robot object is None or invalid, cannot update state")
-                return
+        # Quaternion (w, x, y, z)
+        qw, qx, qy, qz = root_state[0, 3:7].cpu().numpy()
 
-            # Get current state from simulation
-            self.robot.update(self.dt)
-            cur_state = self.robot.data.root_state_w
+        # Quaternion to Euler (ZYX convention)
+        roll = math.atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy))
+        sinp = 2.0 * (qw * qy - qz * qx)
+        # Firmware adjusts pitch sign because of the legacy CF2 body frame
+        pitch = -math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else -math.asin(sinp)
+        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
-            # Extract position, orientation, velocity and angular velocity
-            position = {
-                "x": cur_state[0, 0].item(),
-                "y": cur_state[0, 1].item(),
-                "z": cur_state[0, 2].item()
-            }
+        # Wrap to [-180, 180]
+        def wrap(a):
+            return ((a + math.pi) % (2 * math.pi)) - math.pi
 
-            # Get quaternion values directly
-            quat_w = cur_state[0, 3].item()
-            quat_x = cur_state[0, 4].item()
-            quat_y = cur_state[0, 5].item()
-            quat_z = cur_state[0, 6].item()
+        orient = {
+            "roll": math.degrees(wrap(roll)),
+            "pitch": math.degrees(wrap(pitch)),
+            "yaw": math.degrees(wrap(yaw)),
+        }
 
-            # Manual quaternion to Euler angles conversion
-            # Roll (x-axis rotation)
-            sinr_cosp = 2.0 * (quat_w * quat_x + quat_y * quat_z)
-            cosr_cosp = 1.0 - 2.0 * (quat_x * quat_x + quat_y * quat_y)
-            roll = math.atan2(sinr_cosp, cosr_cosp)
+        # Velocity (world frame)
+        vel = {
+            "x": root_state[0, 7].item(),
+            "y": root_state[0, 8].item(),
+            "z": root_state[0, 9].item(),
+        }
 
-            # Pitch (y-axis rotation)
-            sinp = 2.0 * (quat_w * quat_y - quat_z * quat_x)
-            if abs(sinp) >= 1:
-                pitch = math.copysign(math.pi / 2, sinp)  # Use 90 degrees if out of range
-            else:
-                pitch = math.asin(sinp)
+        # Angular velocity - convert from world frame to body frame
+        # The Crazyflie firmware expects body-frame angular velocity (gyro output)
+        # ω_body = R^T * ω_world, where R is the rotation matrix from body to world
+        omega_world = root_state[0, 10:13].cpu().numpy()
 
-            # Yaw (z-axis rotation)
-            siny_cosp = 2.0 * (quat_w * quat_z + quat_x * quat_y)
-            cosy_cosp = 1.0 - 2.0 * (quat_y * quat_y + quat_z * quat_z)
-            yaw = math.atan2(siny_cosp, cosy_cosp)
+        # Build rotation matrix from quaternion (body to world)
+        # R = [[1-2(qy²+qz²), 2(qx*qy-qz*qw), 2(qx*qz+qy*qw)],
+        #      [2(qx*qy+qz*qw), 1-2(qx²+qz²), 2(qy*qz-qx*qw)],
+        #      [2(qx*qz-qy*qw), 2(qy*qz+qx*qw), 1-2(qx²+qy²)]]
+        r00 = 1 - 2 * (qy * qy + qz * qz)
+        r01 = 2 * (qx * qy - qz * qw)
+        r02 = 2 * (qx * qz + qy * qw)
+        r10 = 2 * (qx * qy + qz * qw)
+        r11 = 1 - 2 * (qx * qx + qz * qz)
+        r12 = 2 * (qy * qz - qx * qw)
+        r20 = 2 * (qx * qz - qy * qw)
+        r21 = 2 * (qy * qz + qx * qw)
+        r22 = 1 - 2 * (qx * qx + qy * qy)
 
-            # Store Euler angles in degrees for consistency with real Crazyflie
-            orientation = {
-                "roll": math.degrees(normalize_angle(roll)),
-                "pitch": math.degrees(normalize_angle(pitch)),
-                "yaw": math.degrees(normalize_angle(yaw))
-            }
+        # R^T * omega_world (transpose of rotation matrix applied to world angular velocity)
+        omega_body_x = r00 * omega_world[0] + r10 * omega_world[1] + r20 * omega_world[2]
+        omega_body_y = r01 * omega_world[0] + r11 * omega_world[1] + r21 * omega_world[2]
+        omega_body_z = r02 * omega_world[0] + r12 * omega_world[1] + r22 * omega_world[2]
 
-            velocity = {
-                "x": cur_state[0, 7].item(),
-                "y": cur_state[0, 8].item(),
-                "z": cur_state[0, 9].item()
-            }
+        # Convert to deg/s (body frame: +X forward, +Y left, +Z up)
+        # The attitude controller applies the firmware's -gyro.y convention itself,
+        # so we keep the raw body rates here.
+        ang_vel = {
+            "x": math.degrees(omega_body_x),
+            "y": math.degrees(omega_body_y),
+            "z": math.degrees(omega_body_z),
+        }
 
-            angular_velocity = {
-                "x": cur_state[0, 10].item(),
-                "y": cur_state[0, 11].item(),
-                "z": cur_state[0, 12].item()
-            }
-
-            # Convert angular velocity from rad/s to deg/s for API consistency with real Crazyflie
-            RAD_TO_DEG = 180.0 / math.pi
-            angular_velocity = {
-                "x": angular_velocity["x"] * RAD_TO_DEG,
-                "y": angular_velocity["y"] * RAD_TO_DEG,
-                "z": angular_velocity["z"] * RAD_TO_DEG
-            }
-
-            # Update state with lock
-            with self.state_lock:
-                self.state.position = position
-                self.state.velocity = velocity
-                self.state.orientation = orientation
-                self.state.angular_velocity = angular_velocity
-                self.state.timestamp = time.time()
-
-            logger.debug(f"State updated: pos=({position['x']:.2f}, {position['y']:.2f}, {position['z']:.2f}), "
-                        f"orientation=({orientation['roll']:.2f}, {orientation['pitch']:.2f}, {orientation['yaw']:.2f})")
-        except Exception as e:
-            logger.error(f"Error updating state: {e}")
+        with self.state_lock:
+            self.state.position = pos
+            self.state.velocity = vel
+            self.state.orientation = orient
+            self.state.angular_velocity = ang_vel
+            self.state.timestamp = self.sim.current_time
 
     def _process_commands(self):
-        """Process any pending commands in the queues."""
-        # Process position commands
-        try:
-            while not self.position_cmd_queue.empty():
-                cmd = self.position_cmd_queue.get_nowait()
-                self.current_position_cmd = cmd
-                self.control_mode = "position"
+        """Process queued commands."""
+        while not self.cmd_queue.empty():
+            try:
+                cmd_type, cmd_data = self.cmd_queue.get_nowait()
+                self.current_cmd_type = cmd_type
 
-                # Log the full command including yaw if present
-                log_msg = f"Position command updated: x={cmd.get('x', 0.0):.2f}, y={cmd.get('y', 0.0):.2f}, z={cmd.get('z', 0.0):.2f}"
-                if 'yaw' in cmd:
-                    log_msg += f", yaw={cmd['yaw']:.2f}°"
-                logger.debug(log_msg)
-        except queue.Empty:
-            pass
+                if cmd_type == CommandType.POSITION:
+                    self.position_setpoint = cmd_data
+                elif cmd_type == CommandType.VELOCITY:
+                    self.velocity_setpoint = cmd_data
+                elif cmd_type == CommandType.ATTITUDE:
+                    self.attitude_setpoint = cmd_data
+            except queue.Empty:
+                break
 
-        # Process attitude commands
-        try:
-            while not self.attitude_cmd_queue.empty():
-                cmd = self.attitude_cmd_queue.get_nowait()
-                self.current_attitude_cmd = cmd
-                self.control_mode = "attitude"
-                logger.debug(f"Attitude command updated: {cmd}")
-        except queue.Empty:
-            pass
-
-    def _compute_control(self):
-        """Compute control outputs based on current mode and commands."""
-        # Get current state dictionary
+    def _compute_control(self) -> tuple:
+        """Compute control from current setpoints."""
         with self.state_lock:
-            state_dict = asdict(self.state)
+            state_dict = self._state_to_tensors()
 
-        try:
-            if self.control_mode == "position":
-                # Position control mode
-                thrust_vector = self.position_controller.compute(
-                    state_dict, self.current_position_cmd, self.dt
-                )
-
-                # Convert thrust vector to attitude command
-                # Calculate desired roll and pitch from thrust vector
-                thrust_x, thrust_y, thrust_z = thrust_vector
-
-                # Compute roll and pitch angles (simplified)
-                # Limit roll and pitch to avoid instability
-                max_angle = 0.5  # ~28.6 degrees
-                roll = -thrust_y / max(thrust_z, 0.1)  # Roll is negative of y thrust
-                pitch = thrust_x / max(thrust_z, 0.1)  # Pitch is x thrust
-
-                # Clamp roll and pitch to valid range
-                roll = max(-max_angle, min(max_angle, roll))
-                pitch = max(-max_angle, min(max_angle, pitch))
-
-                # Handle yaw control if specified in the position command
-                yaw_rate = 0.0
-                if 'yaw' in self.current_position_cmd:
-                    # Get current yaw angle
-                    current_yaw = state_dict.get('orientation', {}).get('yaw', 0.0)
-                    # Get target yaw angle
-                    target_yaw = self.current_position_cmd['yaw']
-
-                    # Calculate yaw error (considering the circular nature of angles)
-                    yaw_error = target_yaw - current_yaw
-                    # Normalize to -180 to 180 degrees
-                    if yaw_error > 180:
-                        yaw_error -= 360
-                    elif yaw_error < -180:
-                        yaw_error += 360
-
-                    # Simple proportional control for yaw
-                    yaw_p_gain = 2.0
-                    # Convert yaw error to yaw rate (normalized to [-1, 1])
-                    MAX_YAW_RATE = 120.0  # degrees/s
-                    yaw_rate = yaw_p_gain * yaw_error / MAX_YAW_RATE
-                    yaw_rate = max(-1.0, min(1.0, yaw_rate))  # Clamp to [-1, 1]
-
-                    logger.debug(f"Yaw control: current={current_yaw:.1f}°, target={target_yaw:.1f}°, error={yaw_error:.1f}°, rate={yaw_rate:.2f}")
-
-                # Create attitude command with normalized values [-1, 1]
-                attitude_cmd = {
-                    "roll": roll / max_angle,
-                    "pitch": pitch / max_angle,
-                    "yaw_rate": yaw_rate,
-                    "thrust": thrust_z
-                }
-
-                # Calculate force and torque using attitude controller
-                force, torque = self.attitude_controller.compute(state_dict, attitude_cmd, self.dt)
-            else:
-                # Direct attitude control mode
-                force, torque = self.attitude_controller.compute(
-                    state_dict, self.current_attitude_cmd, self.dt
-                )
-
-            return force, torque
-
-        except Exception as e:
-            logger.error(f"Error computing control: {e}")
-            # Return zero force and torque in case of error
-            return (
-                torch.zeros(1, 3, device=self.attitude_controller.device),
-                torch.zeros(1, 3, device=self.attitude_controller.device)
+        if self.current_cmd_type == CommandType.POSITION:
+            self.controller.set_position_setpoint(
+                x=torch.tensor([self.position_setpoint["x"]], device=self.device),
+                y=torch.tensor([self.position_setpoint["y"]], device=self.device),
+                z=torch.tensor([self.position_setpoint["z"]], device=self.device),
+                yaw=torch.tensor([self.position_setpoint.get("yaw", 0.0)], device=self.device),
+            )
+        elif self.current_cmd_type == CommandType.VELOCITY:
+            self.controller.set_velocity_setpoint(
+                vx=torch.tensor([self.velocity_setpoint["vx"]], device=self.device),
+                vy=torch.tensor([self.velocity_setpoint["vy"]], device=self.device),
+                vz=torch.tensor([self.velocity_setpoint["vz"]], device=self.device),
+                yaw_rate=torch.tensor([self.velocity_setpoint.get("yaw_rate", 0.0)], device=self.device),
+            )
+        else:  # ATTITUDE
+            self.controller.set_attitude_setpoint(
+                roll=torch.tensor([self.attitude_setpoint["roll"]], device=self.device),
+                pitch=torch.tensor([self.attitude_setpoint["pitch"]], device=self.device),
+                yaw_rate=torch.tensor([self.attitude_setpoint["yaw_rate"]], device=self.device),
+                thrust=torch.tensor([self.attitude_setpoint["thrust"]], device=self.device),
             )
 
-    def _apply_control(self, force, torque):
-        """Apply force and torque to the drone."""
-        try:
-            # Check if robot is valid
-            if not hasattr(self, 'robot') or self.robot is None:
-                logger.error("Robot object is None or invalid, cannot apply control")
-                return
+        return self.controller.compute(state_dict)
 
-            # Prepare force and torque tensors
-            forces = torch.zeros((1, 1, 3), device=self.attitude_controller.device)
-            torques = torch.zeros((1, 1, 3), device=self.attitude_controller.device)
+    def _state_to_tensors(self) -> Dict[str, torch.Tensor]:
+        """Convert state dict to tensor format for controller."""
+        return {
+            "position": torch.tensor([[
+                self.state.position["x"],
+                self.state.position["y"],
+                self.state.position["z"],
+            ]], device=self.device, dtype=torch.float32),
+            "velocity": torch.tensor([[
+                self.state.velocity["x"],
+                self.state.velocity["y"],
+                self.state.velocity["z"],
+            ]], device=self.device, dtype=torch.float32),
+            "attitude": torch.tensor([[
+                self.state.orientation["roll"],
+                self.state.orientation["pitch"],
+                self.state.orientation["yaw"],
+            ]], device=self.device, dtype=torch.float32),
+            "angular_velocity": torch.tensor([[
+                self.state.angular_velocity["x"],
+                self.state.angular_velocity["y"],
+                self.state.angular_velocity["z"],
+            ]], device=self.device, dtype=torch.float32),
+        }
 
-            # Set force and torque values
-            forces[0, 0, :] = force[0, :]
-            torques[0, 0, :] = torque[0, :]
+    def _apply_control(self, force: torch.Tensor, torque: torch.Tensor):
+        """Apply force and torque to simulation."""
+        forces = torch.zeros((1, 1, 3), device=self.device)
+        torques = torch.zeros((1, 1, 3), device=self.device)
+        forces[0, 0, :] = force[0, :]
+        torques[0, 0, :] = torque[0, :]
 
-            # Apply to the robot
-            body_id = self.robot.find_bodies("body")[0]
-            self.robot.set_external_force_and_torque(forces, torques, body_ids=body_id)
-            self.robot.write_data_to_sim()
+        body_id = self.robot.find_bodies("body")[0]
+        self.robot.set_external_force_and_torque(forces, torques, body_ids=body_id)
 
-            logger.debug(f"Applied force={force[0].cpu().numpy()} torque={torque[0].cpu().numpy()}")
-        except Exception as e:
-            logger.error(f"Error applying control: {e}")
+        # Update propeller velocities based on motor thrust
+        # Motor thrust is stored in controller's power_distribution
+        self._update_propeller_velocities()
 
-    def enqueue_position_cmd(self, x: float, y: float, z: float, yaw: float = None):
-        """
-        Enqueue a position command.
+        self.robot.write_data_to_sim()
 
-        Args:
-            x: X position (m)
-            y: Y position (m)
-            z: Z position (m)
-            yaw: Yaw angle in degrees (optional)
-        """
-        cmd = {"x": x, "y": y, "z": z}
-        if yaw is not None:
-            cmd["yaw"] = yaw
-        self.position_cmd_queue.put(cmd)
-        log_msg = f"Position command enqueued: x={x:.2f}, y={y:.2f}, z={z:.2f}"
-        if yaw is not None:
-            log_msg += f", yaw={yaw:.2f}°"
-        logger.info(log_msg)
+    def _update_propeller_velocities(self):
+        """Update propeller joint velocities based on motor thrust."""
+        # Get motor thrust from controller (PWM scale 0-65535)
+        motor_thrust = self.controller.power_distribution.motor_thrust[0]  # [4]
+
+        # Convert thrust to angular velocity
+        # At max thrust (65535), propeller spins at ~1000 rad/s (~9500 RPM)
+        # This is an approximation for visualization
+        max_omega = 1000.0  # rad/s at max thrust
+        omega = motor_thrust / 65535.0 * max_omega
+
+        # Motor spin directions: M1 CW, M2 CCW, M3 CW, M4 CCW
+        # In the model, positive joint velocity = one direction
+        # CW motors (M1, M3): positive rotation
+        # CCW motors (M2, M4): negative rotation
+        joint_vel = torch.zeros((1, 4), device=self.device)
+        joint_vel[0, 0] = omega[0]   # m1_joint (CW)
+        joint_vel[0, 1] = -omega[1]  # m2_joint (CCW)
+        joint_vel[0, 2] = omega[2]   # m3_joint (CW)
+        joint_vel[0, 3] = -omega[3]  # m4_joint (CCW)
+
+        # Keep current joint positions (propellers just spin)
+        joint_pos = self.robot.data.joint_pos.clone()
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
+
+    def _update_frame_marker(self):
+        """Update body frame visualization marker."""
+        root_state = self.robot.data.root_state_w
+        # Position
+        pos = root_state[0, :3].cpu().numpy().reshape(1, 3)
+        # Orientation (w, x, y, z)
+        quat = root_state[0, 3:7].cpu().numpy().reshape(1, 4)
+        self.frame_marker.visualize(translations=pos, orientations=quat)
+
+    # --- Public API ---
+
+    def enqueue_position_cmd(self, x: float, y: float, z: float, yaw: float = 0.0):
+        """Queue position command."""
+        self.cmd_queue.put((CommandType.POSITION, {"x": x, "y": y, "z": z, "yaw": yaw}))
+        logger.debug(f"Position cmd: x={x:.2f}, y={y:.2f}, z={z:.2f}, yaw={yaw:.2f}")
+
+    def enqueue_velocity_cmd(self, vx: float, vy: float, vz: float, yaw_rate: float = 0.0):
+        """Queue velocity command (body frame)."""
+        self.cmd_queue.put((CommandType.VELOCITY, {"vx": vx, "vy": vy, "vz": vz, "yaw_rate": yaw_rate}))
+        logger.debug(f"Velocity cmd: vx={vx:.2f}, vy={vy:.2f}, vz={vz:.2f}")
 
     def enqueue_attitude_cmd(self, roll: float, pitch: float, yaw_rate: float, thrust: float):
         """
-        Enqueue an attitude command.
+        Queue attitude command.
 
         Args:
-            roll: Roll angle normalized [-1, 1]
-            pitch: Pitch angle normalized [-1, 1]
-            yaw_rate: Yaw rate normalized [-1, 1]
-            thrust: Thrust normalized [0, 1]
+            roll: Normalized roll [-1, 1]
+            pitch: Normalized pitch [-1, 1]
+            yaw_rate: Normalized yaw rate [-1, 1]
+            thrust: Normalized thrust [0, 1]
         """
         cmd = {
             "roll": max(-1.0, min(1.0, roll)),
             "pitch": max(-1.0, min(1.0, pitch)),
             "yaw_rate": max(-1.0, min(1.0, yaw_rate)),
-            "thrust": max(0.0, min(1.0, thrust))
+            "thrust": max(0.0, min(1.0, thrust)),
         }
-        self.attitude_cmd_queue.put(cmd)
-        logger.info(f"Attitude command enqueued: roll={roll:.2f}, pitch={pitch:.2f}, "
-                  f"yaw_rate={yaw_rate:.2f}, thrust={thrust:.2f}")
-
-    def update_pid_params(self, kp: Dict[str, float] = None, ki: Dict[str, float] = None,
-                         kd: Dict[str, float] = None):
-        """
-        Update PID controller parameters.
-
-        Args:
-            kp: Proportional gains
-            ki: Integral gains
-            kd: Derivative gains
-        """
-        self.position_controller.update_params(kp, ki, kd)
-        logger.info(f"PID parameters updated: Kp={kp}, Ki={ki}, Kd={kd}")
+        self.cmd_queue.put((CommandType.ATTITUDE, cmd))
 
     def get_state(self) -> Dict[str, Any]:
-        """
-        Get the current drone state.
-
-        Returns:
-            Dictionary containing drone state information with:
-            - position: {x, y, z} in meters
-            - velocity: {x, y, z} in m/s
-            - orientation: {roll, pitch, yaw} in degrees
-            - angular_velocity: {x, y, z} in degrees/s (converted from rad/s)
-            - timestamp: time in seconds
-        """
+        """Get current drone state (thread-safe)."""
         with self.state_lock:
             return asdict(self.state)
 
     def reset(self):
-        """Reset the simulation and controllers."""
-        try:
-            # Ensure robot object is valid before resetting
-            if hasattr(self, 'robot') and self.robot is not None:
-                # Reset robot position
-                default_root_state = self.robot.data.default_root_state.clone()
-                default_root_state[:, 2] = 0.1  # Set height to 10cm
-                self.robot.write_root_pose_to_sim(default_root_state[:, :7])
-                self.robot.write_root_velocity_to_sim(torch.zeros_like(default_root_state[:, 7:]))
+        """Reset simulation and controller."""
+        # Clear command queue first to stop any ongoing commands
+        while not self.cmd_queue.empty():
+            try:
+                self.cmd_queue.get_nowait()
+            except queue.Empty:
+                break
 
-                # Force an update to ensure robot state is properly initialized
-                self.robot.update(self.dt)
-            else:
-                # Robot object is no longer valid, attempt to re-initialize simulation
-                logger.warning("Robot object invalid, attempting to re-initialize simulation")
-                self._setup_simulation()
+        # Reset setpoints
+        self.current_cmd_type = CommandType.ATTITUDE
+        self.position_setpoint = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+        self.velocity_setpoint = {"vx": 0.0, "vy": 0.0, "vz": 0.0, "yaw_rate": 0.0}
+        self.attitude_setpoint = {"roll": 0.0, "pitch": 0.0, "yaw_rate": 0.0, "thrust": 0.0}
 
-            # Reset controllers
-            self.position_controller.reset()
-            self.attitude_controller.reset()
+        # Clear external forces
+        body_id = self.robot.find_bodies("body")[0]
+        zero_force = torch.zeros((1, 1, 3), device=self.device)
+        self.robot.set_external_force_and_torque(zero_force, zero_force, body_ids=body_id)
+        self.robot.write_data_to_sim()
 
-            # Clear command queues
-            while not self.position_cmd_queue.empty():
-                self.position_cmd_queue.get_nowait()
-            while not self.attitude_cmd_queue.empty():
-                self.attitude_cmd_queue.get_nowait()
+        # Reset robot to initial pose
+        # Note: Do NOT call self.sim.reset() - it invalidates PhysX references
+        root_state = torch.zeros((1, 13), device=self.device)
+        root_state[:, 0] = 0.0   # x
+        root_state[:, 1] = 0.0   # y
+        root_state[:, 2] = 0.1   # z (10cm above ground)
+        root_state[:, 3] = 1.0   # qw (identity quaternion)
+        root_state[:, 4] = 0.0   # qx
+        root_state[:, 5] = 0.0   # qy
+        root_state[:, 6] = 0.0   # qz
+        # velocity already zero
 
-            # Reset current commands
-            self.current_position_cmd = {"x": 0.0, "y": 0.0, "z": 0.0}
-            self.current_attitude_cmd = {"roll": 0.0, "pitch": 0.0, "yaw_rate": 0.0, "thrust": 0.5}
+        self.robot.write_root_pose_to_sim(root_state[:, :7])
+        self.robot.write_root_velocity_to_sim(root_state[:, 7:])
 
-            # Reset state with Euler angles
-            with self.state_lock:
-                self.state = DroneState(
-                    position={"x": 0.0, "y": 0.0, "z": 0.1},
-                    velocity={"x": 0.0, "y": 0.0, "z": 0.0},
-                    orientation={"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
-                    angular_velocity={"x": 0.0, "y": 0.0, "z": 0.0},
-                    timestamp=time.time()
-                )
+        # Reset joint states
+        joint_pos = self.robot.data.default_joint_pos.clone()
+        joint_vel = torch.zeros_like(joint_pos)
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
 
-            logger.info("Simulation reset completed")
-        except Exception as e:
-            logger.error(f"Error resetting simulation: {e}")
-            raise
+        self.robot.write_data_to_sim()
+
+        # Update robot data
+        self.robot.update(self.dt)
+
+
+        # Update internal state
+        self._update_state()
+
+        # Reset controller with current state
+        with self.state_lock:
+            state_tensors = self._state_to_tensors()
+        self.controller.reset(state_tensors)
+
+        logger.info("Simulation reset")
 
     def get_controller_params(self) -> Dict[str, Any]:
-        """
-        Get the current controller parameters.
-
-        Returns:
-            Dictionary with controller parameters
-        """
+        """Get controller parameters for debugging."""
         return {
-            "position_controller": {
-                "Kp": self.position_controller.kp,
-                "Ki": self.position_controller.ki,
-                "Kd": self.position_controller.kd,
-                "max_thrust": self.position_controller.max_thrust,
-                "min_thrust": self.position_controller.min_thrust
-            }
+            "mass": self.mass,
+            "arm_length": self.arm_length,
+            "inertia": self.inertia,
+            "thrust_max": cf_config.THRUST_MAX,
+            "pid_roll_rate": {
+                "kp": cf_config.PID_ROLL_RATE_KP,
+                "ki": cf_config.PID_ROLL_RATE_KI,
+                "kd": cf_config.PID_ROLL_RATE_KD,
+                "i_limit": cf_config.PID_ROLL_RATE_INTEGRATION_LIMIT,
+            },
+            "pid_roll": {
+                "kp": cf_config.PID_ROLL_KP,
+                "ki": cf_config.PID_ROLL_KI,
+                "kd": cf_config.PID_ROLL_KD,
+                "i_limit": cf_config.PID_ROLL_INTEGRATION_LIMIT,
+            },
+            "pid_pitch_rate": {
+                "kp": cf_config.PID_PITCH_RATE_KP,
+                "ki": cf_config.PID_PITCH_RATE_KI,
+                "kd": cf_config.PID_PITCH_RATE_KD,
+                "i_limit": cf_config.PID_PITCH_RATE_INTEGRATION_LIMIT,
+            },
+            "pid_pitch": {
+                "kp": cf_config.PID_PITCH_KP,
+                "ki": cf_config.PID_PITCH_KI,
+                "kd": cf_config.PID_PITCH_KD,
+                "i_limit": cf_config.PID_PITCH_INTEGRATION_LIMIT,
+            },
+            "pid_yaw_rate": {
+                "kp": cf_config.PID_YAW_RATE_KP,
+                "ki": cf_config.PID_YAW_RATE_KI,
+                "kd": cf_config.PID_YAW_RATE_KD,
+                "i_limit": cf_config.PID_YAW_RATE_INTEGRATION_LIMIT,
+            },
+            "pid_yaw": {
+                "kp": cf_config.PID_YAW_KP,
+                "ki": cf_config.PID_YAW_KI,
+                "kd": cf_config.PID_YAW_KD,
+                "i_limit": cf_config.PID_YAW_INTEGRATION_LIMIT,
+            },
         }
+
+    def get_controller_debug(self) -> Dict[str, Any]:
+        """Get latest controller debug telemetry."""
+        dbg = getattr(self.controller, "last_debug", None)
+        if not dbg:
+            return {}
+
+        def to_list(tensor):
+            if tensor is None:
+                return None
+            return tensor.detach().cpu().numpy().tolist()
+
+        return {
+            "attitude_desired": to_list(dbg.get("attitude_desired")),
+            "attitude": to_list(dbg.get("attitude")),
+            "gyro": to_list(dbg.get("gyro")),
+            "rate_desired": to_list(dbg.get("rate_desired")),
+            "rate_actual": to_list(dbg.get("rate_actual")),
+            "roll_cmd": to_list(dbg.get("roll_cmd")),
+            "pitch_cmd": to_list(dbg.get("pitch_cmd")),
+            "yaw_cmd": to_list(dbg.get("yaw_cmd")),
+            "thrust_pwm": to_list(dbg.get("thrust_pwm")),
+            "motor_pwm": to_list(dbg.get("motor_pwm")),
+            "force": to_list(dbg.get("force")),
+            "torque": to_list(dbg.get("torque")),
+            "position_setpoint": to_list(dbg.get("position_setpoint")),
+            "position": to_list(dbg.get("position")),
+            "velocity_setpoint": to_list(dbg.get("velocity_setpoint")),
+            "velocity": to_list(dbg.get("velocity")),
+            "timestamp": self.sim.current_time,
+        }
+
+    def update_controller_params(self, params: Dict[str, Any]):
+        """Update controller gains at runtime."""
+        try:
+            self.controller.set_gains(params)
+        except Exception as e:
+            logger.error(f"Failed to update controller params: {e}")
+            raise
