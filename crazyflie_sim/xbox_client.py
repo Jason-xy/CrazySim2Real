@@ -151,7 +151,7 @@ class Controller:
         # Right stick: roll (X) and pitch (Y)
         # Left stick: yaw rate (X, inverted for CW) and throttle (Y, inverted)
         self.roll = s.right_x
-        self.pitch = s.right_y       # Up (raw -1) = negative pitch = nose down = forward
+        self.pitch = -s.right_y
         self.yaw_rate = -s.left_x    # Right = positive yaw (clockwise from above)
         self.thrust = (-s.left_y + 1.0) / 2.0  # Up = more thrust
 

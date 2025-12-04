@@ -11,7 +11,6 @@ import logging
 import threading
 import queue
 import time
-import math
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from enum import IntEnum
@@ -24,6 +23,7 @@ from isaaclab.assets import Articulation
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaacsim.core.utils.prims import set_prim_property
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.math import euler_xyz_from_quat, matrix_from_quat
 from isaacsim.core.utils.stage import add_reference_to_stage
 from isaaclab_assets import CRAZYFLIE_CFG
 
@@ -207,24 +207,16 @@ class SimulationManager:
             "z": root_state[0, 2].item(),
         }
 
-        # Quaternion (w, x, y, z)
-        qw, qx, qy, qz = root_state[0, 3:7].cpu().numpy()
-
-        # Quaternion to Euler (ZYX convention)
-        roll = math.atan2(2.0 * (qw * qx + qy * qz), 1.0 - 2.0 * (qx * qx + qy * qy))
-        sinp = 2.0 * (qw * qy - qz * qx)
-        # Firmware adjusts pitch sign because of the legacy CF2 body frame
-        pitch = -math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else -math.asin(sinp)
-        yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
-
-        # Wrap to [-180, 180]
-        def wrap(a):
-            return ((a + math.pi) % (2 * math.pi)) - math.pi
-
+        # Quaternion (w, x, y, z) -> Euler angles using isaaclab util
+        quat = root_state[0, 3:7].unsqueeze(0)
+        roll, pitch, yaw = euler_xyz_from_quat(quat)
+        angles = torch.stack((roll, pitch, yaw), dim=-1).squeeze(0)
+        # Wrap to [-pi, pi]
+        angles = torch.remainder(angles + torch.pi, 2 * torch.pi) - torch.pi
         orient = {
-            "roll": math.degrees(wrap(roll)),
-            "pitch": math.degrees(wrap(pitch)),
-            "yaw": math.degrees(wrap(yaw)),
+            "roll": torch.rad2deg(angles[0]).item(),
+            "pitch": torch.rad2deg(angles[1]).item(),
+            "yaw": torch.rad2deg(angles[2]).item(),
         }
 
         # Velocity (world frame)
@@ -237,34 +229,19 @@ class SimulationManager:
         # Angular velocity - convert from world frame to body frame
         # The Crazyflie firmware expects body-frame angular velocity (gyro output)
         # ω_body = R^T * ω_world, where R is the rotation matrix from body to world
-        omega_world = root_state[0, 10:13].cpu().numpy()
+        omega_world = root_state[0, 10:13]
 
-        # Build rotation matrix from quaternion (body to world)
-        # R = [[1-2(qy²+qz²), 2(qx*qy-qz*qw), 2(qx*qz+qy*qw)],
-        #      [2(qx*qy+qz*qw), 1-2(qx²+qz²), 2(qy*qz-qx*qw)],
-        #      [2(qx*qz-qy*qw), 2(qy*qz+qx*qw), 1-2(qx²+qy²)]]
-        r00 = 1 - 2 * (qy * qy + qz * qz)
-        r01 = 2 * (qx * qy - qz * qw)
-        r02 = 2 * (qx * qz + qy * qw)
-        r10 = 2 * (qx * qy + qz * qw)
-        r11 = 1 - 2 * (qx * qx + qz * qz)
-        r12 = 2 * (qy * qz - qx * qw)
-        r20 = 2 * (qx * qz - qy * qw)
-        r21 = 2 * (qy * qz + qx * qw)
-        r22 = 1 - 2 * (qx * qx + qy * qy)
-
-        # R^T * omega_world (transpose of rotation matrix applied to world angular velocity)
-        omega_body_x = r00 * omega_world[0] + r10 * omega_world[1] + r20 * omega_world[2]
-        omega_body_y = r01 * omega_world[0] + r11 * omega_world[1] + r21 * omega_world[2]
-        omega_body_z = r02 * omega_world[0] + r12 * omega_world[1] + r22 * omega_world[2]
+        # Rotation matrix from quaternion (body to world) from isaaclab util
+        rotation_matrix = matrix_from_quat(quat)[0]
+        omega_body = rotation_matrix.t().matmul(omega_world)
 
         # Convert to deg/s (body frame: +X forward, +Y left, +Z up)
         # The attitude controller applies the firmware's -gyro.y convention itself,
         # so we keep the raw body rates here.
         ang_vel = {
-            "x": math.degrees(omega_body_x),
-            "y": math.degrees(omega_body_y),
-            "z": math.degrees(omega_body_z),
+            "x": torch.rad2deg(omega_body[0]).item(),
+            "y": torch.rad2deg(omega_body[1]).item(),
+            "z": torch.rad2deg(omega_body[2]).item(),
         }
 
         with self.state_lock:
