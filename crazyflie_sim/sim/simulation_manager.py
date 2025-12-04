@@ -172,6 +172,7 @@ class SimulationManager:
             device=self.device,
             attitude_dt=self.dt,  # Use sim dt for both loops in simulation
             position_dt=self.dt,
+            enable_debug=True,
         )
         logger.info("Controller initialized with CF2.1 BL parameters")
 
