@@ -1,43 +1,31 @@
 """
-Configuration parameters for the Crazyflie simulator.
+Configuration for Crazyflie simulator.
+
+Physical parameters are imported from the CF2.1 BL controller config
+to ensure consistency between simulation and controller.
 """
+from crazyflie_sim.controllers.cf_controller import config as cf_config
 
 # Simulation parameters
-SIM_DT = 0.01  # Simulation time step in seconds
-SIM_FREQUENCY = 100  # 1/dt Hz
+SIM_FREQUENCY = 150 # Hz
+SIM_DT = 1.0 / SIM_FREQUENCY
 
-# Controller parameters
-POSITION_CONTROLLER = {
-    "Kp": {"x": 1.0, "y": 1.0, "z": 1.0},
-    "Ki": {"x": 0.0, "y": 0.0, "z": 0.1},
-    "Kd": {"x": 0.4, "y": 0.4, "z": 0.4},
-    "max_thrust": 1.0,  # Maximum thrust output (normalized)
-    "min_thrust": 0.0,  # Minimum thrust output (normalized)
-}
-
-ATTITUDE_CONTROLLER = {
-    "Krp_ang": [20.0, 20.0],  # Roll/pitch P gain
-    "Kdrp_ang": [0.5, 0.5],   # Roll/pitch D gain
-    "Kinv_ang_vel_tau": [20.0, 20.0, 15.0]
-}
-
-# Physics parameters
+# Physics parameters (from CF2.1 BL firmware)
 PHYSICS = {
-    "mass": 0.049,  # kg
-    "arm_length": 0.046,  # m
-    "inertia": [2.16e-5, 2.16e-5, 4.33e-5],  # kg*m^2
-    "gravity": 9.81  # m/s^2
+    "mass": cf_config.CF_MASS,
+    "arm_length": cf_config.ARM_LENGTH,
+    "inertia": [cf_config.INERTIA_XX, cf_config.INERTIA_YY, cf_config.INERTIA_ZZ],
+    "gravity": cf_config.GRAVITY,
 }
 
-# HTTP Server settings
+# HTTP Server
 SERVER = {
     "host": "localhost",
-    "port": 8000
+    "port": 8000,
 }
 
-# Logging settings
+# Logging
 LOGGING = {
-    "level": "INFO",  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    "level": "INFO",
     "format": "[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
-    "file": "crazyflie_sim.log"
 }

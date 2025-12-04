@@ -20,8 +20,11 @@ CrazySim2Real/
 │   └── tests/               # Test implementation modules
 ├── crazyflie_sim/           # Simulator implementation
 │   ├── api/                 # API server for simulator control
-│   ├── controllers/         # Controller implementations for simulator
-│   └── sim/                 # Simulation manager and physics implementation
+│   ├── controllers/         # Controller implementations for simulator (incl. CF2.1 BL port)
+│   ├── sim/                 # Simulation manager and physics implementation
+│   ├── run.py               # Main simulator entry point
+│   ├── xbox_client.py       # Xbox controller teleoperation client
+│   └── ros2_vis_client.py   # ROS 2 visualization / monitoring client
 ├── docker/                  # Docker configurations
 │   └── isaaclab/            # Isaac Lab simulator environment
 └── scripts/                 # Utility scripts for setup and execution
@@ -78,6 +81,40 @@ The simulator runs in a Docker container with NVIDIA Isaac Lab:
 ```
 
 This will start a Docker container with the Isaac Lab environment and launch the Crazyflie simulator inside it. The simulator exposes an HTTP API that the benchmarking framework can connect to.
+
+## Interactive Control with Xbox Controller
+
+`xbox_client.py` provides a teleoperation interface to control a simulated Crazyflie using an Xbox gamepad.
+
+**Usage** (from repository root, with simulator already running):
+
+```bash
+cd crazyflie_sim
+python xbox_client.py --host localhost --port 8000
+```
+
+You can customize button mappings and sensitivity configuration flags (see `xbox_client.py`).
+
+![Xbox teleoperation UI](assets/xbox_client.png)
+
+## ROS 2 Visualization Client
+
+`ros2_vis_client.py` bridges the simulator with a ROS 2 environment to visualize state and logs in standard ROS tools (e.g., RViz, rqt_plot).
+
+**Features**:
+- Subscribe to simulator state via HTTP/WebSocket API
+- Publish drone pose, velocity, and control signals as ROS 2 topics
+
+**Usage** (ROS 2 environment sourced, simulator running):
+
+```bash
+cd crazyflie_sim
+python ros2_vis_client.py --host localhost --port 8000
+```
+
+You can then visualize the topics in plotjuggler or other ROS 2 tools.
+
+![ROS 2 visualization](assets/ros2_viz_client.png)
 
 ## Running Benchmarks
 

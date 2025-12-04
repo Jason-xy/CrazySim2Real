@@ -1,3 +1,6 @@
 [submodule "docker/isaaclab/IsaacLab"]
 	path = docker/isaaclab/IsaacLab
 	url = https://github.com/isaac-sim/IsaacLab.git
+[submodule "crazyflie_sim/controllers/cf_controller"]
+	path = crazyflie_sim/controllers/cf_controller
+	url = https://github.com/Jason-xy/cf_controller.git
