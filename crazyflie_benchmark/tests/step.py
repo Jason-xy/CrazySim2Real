@@ -8,10 +8,10 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 
-from ..config import FlightConfig
-from ..controller import FlightController
-from ..safety import SafetyMonitor
-from ..logging_manager import LoggingManager
+from ..core.config import FlightConfig
+from ..controllers.base import FlightController
+from ..core.safety import SafetyMonitor
+from ..core.logger import FlightLogger
 from .base import TestStrategy
 
 logger = logging.getLogger(__name__)
@@ -29,10 +29,10 @@ class StepTest(TestStrategy):
                 controller: FlightController,
                 config: FlightConfig,
                 safety_monitor: SafetyMonitor,
-                logging_manager: LoggingManager,
+                logger_instance: FlightLogger,
                 channel: str,
                 amplitude: float,
-                duration: Optional[float] = None):
+                duration: float):
         """
         Initialize the step test strategy.
 
@@ -40,16 +40,16 @@ class StepTest(TestStrategy):
             controller: Flight controller for sending commands
             config: Configuration parameters
             safety_monitor: Safety monitor for checking safety limits
-            logging_manager: Logging manager for recording test data
+            logger_instance: Logging manager for recording test data
             channel: The channel to test ('roll', 'pitch', or 'thrust')
             amplitude: Amplitude of the step input (degrees for roll/pitch, thrust units for thrust)
             duration: Duration of the step input (if None, uses config.step_test_duration)
         """
-        super().__init__(controller, config, safety_monitor, logging_manager)
+        super().__init__(controller, config, safety_monitor, logger_instance)
 
         self.channel = channel
         self.amplitude = amplitude
-        self.duration = duration if duration is not None else config.step_test_duration
+        self.duration = duration
 
         # Set test name and description
         self.test_name = f"step_{channel}_{amplitude}"
@@ -100,14 +100,14 @@ class StepTest(TestStrategy):
                 test_successful = False
                 break
 
-            # Send the step command and log it via the logging_manager
-            self.controller.send_setpoint(
-                roll, pitch, yaw_rate_val, target_thrust, logging_manager=self.logging_manager
-            )
-            logger.info(
-                f"Sent setpoint: Roll: {roll}°, Pitch: {pitch}°, "
-                f"YawRate: {yaw_rate_val}°/s, Thrust: {target_thrust}"
-            )
-            time.sleep(0.02)  # 50Hz control rate
+            # Send the step command and log it
+            self.logger.log_command(roll, pitch, yaw_rate_val, target_thrust)
+            self.controller.send_setpoint(roll, pitch, yaw_rate_val, target_thrust)
+
+            time.sleep(self.controller.CONTROL_PERIOD)
+
+        # Ensure final neutral command is logged and sent
+        self.logger.log_command(0, 0, self.config.default_yaw_rate, self.config.hover_thrust)
+        self.controller.send_setpoint(0, 0, self.config.default_yaw_rate, self.config.hover_thrust)
 
         return test_successful

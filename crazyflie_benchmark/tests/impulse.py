@@ -8,10 +8,10 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 
-from ..config import FlightConfig
-from ..controller import FlightController
-from ..safety import SafetyMonitor
-from ..logging_manager import LoggingManager
+from ..core.config import FlightConfig
+from ..controllers.base import FlightController
+from ..core.safety import SafetyMonitor
+from ..core.logger import FlightLogger
 from .base import TestStrategy
 
 logger = logging.getLogger(__name__)
@@ -29,10 +29,10 @@ class ImpulseTest(TestStrategy):
                 controller: FlightController,
                 config: FlightConfig,
                 safety_monitor: SafetyMonitor,
-                logging_manager: LoggingManager,
+                logger_instance: FlightLogger,
                 channel: str,
                 amplitude: float,
-                duration: Optional[float] = None,
+                duration: float,
                 recovery_duration: Optional[float] = None):
         """
         Initialize the impulse test strategy.
@@ -41,18 +41,18 @@ class ImpulseTest(TestStrategy):
             controller: Flight controller for sending commands
             config: Configuration parameters
             safety_monitor: Safety monitor for checking safety limits
-            logging_manager: Logging manager for recording test data
+            logger_instance: Logging manager for recording test data
             channel: The channel to test ('roll', 'pitch', or 'thrust')
             amplitude: Amplitude of the impulse input (degrees for roll/pitch, thrust units for thrust)
             duration: Duration of the impulse input (if None, uses config.impulse_duration)
             recovery_duration: Duration to measure recovery after impulse
                              (if None, uses config.hold_neutral_duration_s)
         """
-        super().__init__(controller, config, safety_monitor, logging_manager)
+        super().__init__(controller, config, safety_monitor, logger_instance)
 
         self.channel = channel
         self.amplitude = amplitude
-        self.duration = duration if duration is not None else config.impulse_duration
+        self.duration = duration
         self.recovery_duration = recovery_duration if recovery_duration is not None else config.hold_neutral_duration_s
 
         # Set test name and description
@@ -107,19 +107,17 @@ class ImpulseTest(TestStrategy):
                 break
 
             # Send the impulse command and log it
+            self.logger.log_command(roll, pitch, yaw_rate_val, target_thrust)
             self.controller.send_setpoint(
-                roll, pitch, yaw_rate_val, target_thrust, logging_manager=self.logging_manager
+                roll, pitch, yaw_rate_val, target_thrust
             )
-            time.sleep(0.02)  # 50Hz control rate
+            time.sleep(self.controller.CONTROL_PERIOD)
 
         # Phase 2: Return to neutral and measure recovery if phase 1 was successful
         if test_successful:
             logger.info(
                 f"Impulse complete. Measuring recovery for {self.recovery_duration}s"
             )
-
-            # Update the logging maneuver to indicate recovery phase
-            self.logging_manager.set_current_maneuver(f"{self.test_name}_recovery")
 
             recovery_start_time = time.time()
 
@@ -133,13 +131,17 @@ class ImpulseTest(TestStrategy):
                     break
 
                 # Send neutral commands during recovery and log them
+                self.logger.log_command(0, 0, self.config.default_yaw_rate, self.config.hover_thrust)
                 self.controller.send_setpoint(
                     0,
                     0,
                     self.config.default_yaw_rate,
-                    self.config.hover_thrust,
-                    logging_manager=self.logging_manager,
+                    self.config.hover_thrust
                 )
-                time.sleep(0.02)  # 50Hz control rate
+                time.sleep(self.controller.CONTROL_PERIOD)
+
+        # Ensure final neutral command is logged and sent
+        self.logger.log_command(0, 0, self.config.default_yaw_rate, self.config.hover_thrust)
+        self.controller.send_setpoint(0, 0, self.config.default_yaw_rate, self.config.hover_thrust)
 
         return test_successful

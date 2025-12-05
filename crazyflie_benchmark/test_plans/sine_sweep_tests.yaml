@@ -6,18 +6,26 @@ tests:
     channel: "roll"
     amplitude: 5.0  # degrees
     duration: 6.0   # seconds
+    start_freq: 0.5
+    end_freq: 4.0
 
   - type: "sine_sweep"
     channel: "pitch"
     amplitude: 5.0  # degrees
     duration: 6.0   # seconds
+    start_freq: 0.5
+    end_freq: 4.0
 
   - type: "sine_sweep"
     channel: "yaw"
     amplitude: 30.0  # deg/s yaw rate
     duration: 6.0   # seconds
+    start_freq: 0.5
+    end_freq: 4.0
 
   - type: "sine_sweep"
     channel: "thrust"
     amplitude: 1000  # raw thrust units
     duration: 6.0   # seconds
+    start_freq: 0.5
+    end_freq: 4.0

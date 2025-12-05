@@ -7,9 +7,7 @@ Implements a context manager interface for clean resource management.
 import abc
 import logging
 import time
-import os
-import sys
-from typing import Callable, Dict, Optional, Any, Union, Tuple, Type
+from typing import Callable, Dict, Optional, Any
 
 # Try importing cflib - required for real hardware, optional for simulation
 try:
@@ -81,64 +79,6 @@ class DroneConnectionBase(abc.ABC):
 
         Returns:
             True if the command was sent successfully, False otherwise
-        """
-        pass
-
-    @abc.abstractmethod
-    def send_setpoint(self, roll: float, pitch: float, yaw_rate: float, thrust: float) -> bool:
-        """
-        Send a control setpoint.
-
-        Args:
-            roll: Roll angle in degrees
-            pitch: Pitch angle in degrees
-            yaw_rate: Yaw rate in degrees/s
-            thrust: Thrust as a normalized value (0-1 for simulator, 0-65535 for real drone)
-
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-
-    @abc.abstractmethod
-    def send_position_setpoint(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
-        """
-        Send a position setpoint.
-
-        Args:
-            x: X position in meters
-            y: Y position in meters
-            z: Z position in meters
-            yaw: Yaw angle in degrees
-
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-
-    @abc.abstractmethod
-    def send_hover_setpoint(self, vx: float, vy: float, yaw_rate: float, z: float) -> bool:
-        """
-        Send a hover setpoint.
-
-        Args:
-            vx: X velocity in m/s
-            vy: Y velocity in m/s
-            yaw_rate: Yaw rate in degrees/s
-            z: Z position in meters
-
-        Returns:
-            True if successful, False otherwise
-        """
-        pass
-
-    @abc.abstractmethod
-    def send_stop_setpoint(self) -> bool:
-        """
-        Send a stop setpoint.
-
-        Returns:
-            True if successful, False otherwise
         """
         pass
 
@@ -323,99 +263,6 @@ class CFLibConnection(DroneConnectionBase):
             logger.error(f"Failed to send Kalman estimator reset command: {e}", exc_info=True)
             return False
 
-    def send_setpoint(self, roll: float, pitch: float, yaw_rate: float, thrust: float) -> bool:
-        """
-        Send a control setpoint to the Crazyflie.
-
-        Args:
-            roll: Roll angle in degrees
-            pitch: Pitch angle in degrees
-            yaw_rate: Yaw rate in degrees/s
-            thrust: Thrust as a normalized value (0-1), will be converted to 0-65535
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected or not self.scf:
-            logger.error("Cannot send setpoint: Not connected.")
-            return False
-
-        try:
-            # Convert normalized thrust (0-1) to Crazyflie thrust (0-65535)
-            cf_thrust = int(thrust * 65535)
-
-            self.scf.cf.commander.send_setpoint(roll, pitch, yaw_rate, cf_thrust)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send setpoint: {e}", exc_info=True)
-            return False
-
-    def send_position_setpoint(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
-        """
-        Send a position setpoint to the Crazyflie.
-
-        Args:
-            x: X position in meters
-            y: Y position in meters
-            z: Z position in meters
-            yaw: Yaw angle in degrees
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected or not self.scf:
-            logger.error("Cannot send position setpoint: Not connected.")
-            return False
-
-        try:
-            self.scf.cf.commander.send_position_setpoint(x, y, z, yaw)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send position setpoint: {e}", exc_info=True)
-            return False
-
-    def send_hover_setpoint(self, vx: float, vy: float, yaw_rate: float, z: float) -> bool:
-        """
-        Send a hover setpoint to the Crazyflie.
-
-        Args:
-            vx: X velocity in m/s
-            vy: Y velocity in m/s
-            yaw_rate: Yaw rate in degrees/s
-            z: Z position in meters
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected or not self.scf:
-            logger.error("Cannot send hover setpoint: Not connected.")
-            return False
-
-        try:
-            self.scf.cf.commander.send_hover_setpoint(vx, vy, yaw_rate, z)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send hover setpoint: {e}", exc_info=True)
-            return False
-
-    def send_stop_setpoint(self) -> bool:
-        """
-        Send a stop setpoint to the Crazyflie.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected or not self.scf:
-            logger.error("Cannot send stop setpoint: Not connected.")
-            return False
-
-        try:
-            self.scf.cf.commander.send_stop_setpoint()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send stop setpoint: {e}", exc_info=True)
-            return False
-
 
 class SimulatorConnection(DroneConnectionBase):
     """
@@ -444,14 +291,8 @@ class SimulatorConnection(DroneConnectionBase):
         self.port = port
         self.base_url = f"http://{host}:{port}"
 
-        # Current state and command tracking
+        # Current state cache
         self.state = {}
-        self.attitude_cmd = {
-            "roll": 0.0,
-            "pitch": 0.0,
-            "yaw_rate": 0.0,
-            "thrust": 0.5  # Default to mid-thrust
-        }
 
     def connect(self) -> bool:
         """
@@ -512,6 +353,7 @@ class SimulatorConnection(DroneConnectionBase):
             response = requests.get(f"{self.base_url}/state", timeout=1.0)
             response.raise_for_status()
             self.state = response.json()
+            # Preserve simulator-provided timestamp if available (seconds)
 
             # Convert state to match expected format for logging_manager.py
             # and standardize with CFLibConnection's format
@@ -539,6 +381,12 @@ class SimulatorConnection(DroneConnectionBase):
                     self.state["stabilizer"]["pitch"] = pitch_deg
                     self.state["stabilizer"]["yaw"] = yaw_deg
 
+            # Add thrust data if available
+            if self.state and "thrust" in self.state:
+                if "stabilizer" not in self.state:
+                    self.state["stabilizer"] = {}
+                self.state["stabilizer"]["thrust"] = self.state["thrust"]
+
             # Add gyroscope data from angular velocity
             if self.state and "angular_velocity" in self.state:
                 angular_velocity = self.state["angular_velocity"]
@@ -554,6 +402,9 @@ class SimulatorConnection(DroneConnectionBase):
                 if "z" in angular_velocity:
                     self.state["gyro"]["z"] = angular_velocity["z"]
 
+            # Fetch thrust from debug endpoint
+            self._update_thrust_from_debug()
+
             return self.state
         except requests.exceptions.RequestException as e:
             logger.error(f"Error getting state from simulator: {e}")
@@ -565,6 +416,24 @@ class SimulatorConnection(DroneConnectionBase):
                     self.on_connection_lost(self.base_url, str(e))
 
             return {}
+
+    def _update_thrust_from_debug(self):
+        """Helper to fetch thrust from debug endpoint."""
+        try:
+            response = requests.get(f"{self.base_url}/controller/debug", timeout=0.5)
+            if response.status_code == 200:
+                debug_data = response.json()
+                thrust_pwm = debug_data.get("thrust_pwm")
+                if thrust_pwm and isinstance(thrust_pwm, list) and len(thrust_pwm) > 0:
+                    # thrust_pwm is [thrust]
+                    self.state["thrust"] = float(thrust_pwm[0])
+
+                    if "stabilizer" not in self.state:
+                        self.state["stabilizer"] = {}
+                    self.state["stabilizer"]["thrust"] = self.state["thrust"]
+        except Exception:
+            # Ignore debug fetch errors to avoid spamming logs or failing main loop
+            pass
 
     def reset_estimator(self) -> bool:
         """
@@ -586,161 +455,6 @@ class SimulatorConnection(DroneConnectionBase):
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to send simulator reset command: {e}")
             return False
-
-    def send_setpoint(self, roll: float, pitch: float, yaw_rate: float, thrust: float) -> bool:
-        """
-        Send an attitude command to the simulator.
-
-        This method performs normalization of the input values:
-        - Roll and pitch angles (in degrees) are converted to normalized [-1, 1] range
-          using a +/- 30 degrees = +/- 1.0 scaling (standard for Crazyflie firmware)
-        - Yaw rate (in degrees/s) is converted to normalized [-1, 1] range
-          using a +/- 200 degrees/s = +/- 1.0 scaling
-        - Thrust is normalized to [0, 1] range
-
-        Args:
-            roll: Roll angle in degrees (will be converted to [-1, 1] for simulator)
-            pitch: Pitch angle in degrees (will be converted to [-1, 1] for simulator)
-            yaw_rate: Yaw rate in degrees/s (will be converted to [-1, 1] for simulator)
-            thrust: Thrust normalized [0, 1]
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected:
-            logger.warning("Cannot send setpoint: Not connected to simulator.")
-            return False
-
-        try:
-            # Convert from degrees to normalized values expected by simulator
-            # This scaling matches the Crazyflie firmware (±30 degrees maps to ±1.0)
-            # See https://www.bitcraze.io/documentation/repository/crazyflie-firmware/master/functional-areas/sensor-to-control/controllers/
-            MAX_ROLL_PITCH_DEG = 30.0  # ±30 degrees maps to ±1.0
-            MAX_YAW_RATE_DEG = 30.0   # ±200 deg/s maps to ±1.0
-
-            # Input angles are in degrees, convert to normalized [-1, 1] range
-            roll_norm = roll / MAX_ROLL_PITCH_DEG
-            pitch_norm = pitch / MAX_ROLL_PITCH_DEG
-            yaw_rate_norm = yaw_rate / MAX_YAW_RATE_DEG
-
-            # Clamp values to ensure they're within the expected range
-            roll_norm = max(-1.0, min(1.0, roll_norm))
-            pitch_norm = max(-1.0, min(1.0, pitch_norm))
-            yaw_rate_norm = max(-1.0, min(1.0, yaw_rate_norm))
-            thrust_norm = max(0.0, min(1.0, thrust))
-
-            # Update command values
-            self.attitude_cmd = {
-                "roll": roll_norm,
-                "pitch": pitch_norm,
-                "yaw_rate": yaw_rate_norm,
-                "thrust": thrust_norm
-            }
-
-            # Send command to simulator
-            response = requests.post(
-                f"{self.base_url}/control/attitude",
-                json=self.attitude_cmd,
-                timeout=1.0
-            )
-            response.raise_for_status()
-            return True
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error sending attitude command to simulator: {e}")
-            return False
-
-    def send_position_setpoint(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
-        """
-        Send a position setpoint to the simulator.
-
-        Args:
-            x: X position in meters
-            y: Y position in meters
-            z: Z position in meters
-            yaw: Yaw angle in degrees
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected:
-            logger.warning("Cannot send position setpoint: Not connected to simulator.")
-            return False
-
-        try:
-            # API expects yaw in degrees, which is then converted to radians internally if needed
-            # This matches the behavior of real Crazyflie where yaw is in degrees
-            cmd = {"x": x, "y": y, "z": z, "yaw": yaw}
-            response = requests.post(
-                f"{self.base_url}/control/position",
-                json=cmd,
-                timeout=1.0
-            )
-            response.raise_for_status()
-            return True
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error sending position command to simulator: {e}")
-            return False
-
-    def send_hover_setpoint(self, vx: float, vy: float, yaw_rate: float, z: float) -> bool:
-        """
-        Send a hover setpoint to the simulator.
-
-        In the simulator, this is implemented by calculating a new position based
-        on current position and desired velocity.
-
-        Args:
-            vx: X velocity in m/s
-            vy: Y velocity in m/s
-            yaw_rate: Yaw rate in degrees/s
-            z: Z position in meters
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not self.is_connected:
-            logger.warning("Cannot send hover setpoint: Not connected to simulator.")
-            return False
-
-        try:
-            # First get current state to determine position
-            current_state = self.get_state()
-            if not current_state:
-                logger.error("Cannot send hover setpoint: Failed to get current state.")
-                return False
-
-            # Extract current position
-            position = current_state.get("position", {"x": 0.0, "y": 0.0, "z": 0.0})
-
-            # Get current yaw from state (already in degrees after get_state processing)
-            current_yaw = 0.0
-            if "stabilizer" in current_state and "yaw" in current_state["stabilizer"]:
-                current_yaw = current_state["stabilizer"]["yaw"]
-
-            # Calculate new position based on velocity (simple Euler integration)
-            # In a real system, the drone's controller would handle this internally
-            dt = 0.1  # Assume a short time step for integration
-            new_x = position["x"] + vx * dt
-            new_y = position["y"] + vy * dt
-
-            # Calculate new yaw based on yaw rate
-            new_yaw = current_yaw + yaw_rate * dt
-
-            # Send position command with the calculated position and desired height
-            return self.send_position_setpoint(new_x, new_y, z, new_yaw)
-        except Exception as e:
-            logger.error(f"Error sending hover setpoint to simulator: {e}")
-            return False
-
-    def send_stop_setpoint(self) -> bool:
-        """
-        Send a stop setpoint to the simulator.
-
-        For the simulator, this is implemented by sending a zero attitude command.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        return self.send_setpoint(0.0, 0.0, 0.0, 0.0)
 
 
 class ConnectionManager:
@@ -787,47 +501,3 @@ class ConnectionManager:
 
         else:
             raise ValueError(f"Unsupported connection type: {connection_type}")
-
-    @staticmethod
-    def create_connection_from_config(config) -> DroneConnectionBase:
-        """
-        Create a connection based on configuration.
-
-        Args:
-            config: Configuration object with connection parameters
-
-        Returns:
-            A connection instance based on the configuration
-
-        Raises:
-            ValueError: If the configuration is invalid
-        """
-        # Get connection type from config
-        connection_type = getattr(config, 'connection_type', None)
-
-        if connection_type is None:
-            # Try to infer connection type from URI format
-            uri = getattr(config, 'uri', None)
-            if uri and isinstance(uri, str):
-                if uri.startswith(('radio://', 'usb://')):
-                    connection_type = 'cflib'
-                elif uri.startswith(('http://', 'https://')):
-                    connection_type = 'simulator'
-
-        if connection_type is None:
-            # Default to cflib if available, otherwise simulator
-            connection_type = 'cflib' if CFLIB_AVAILABLE else 'simulator'
-            logger.info(f"No connection type specified, defaulting to {connection_type}")
-
-        # Create connection based on type
-        if connection_type.lower() == 'cflib':
-            uri = getattr(config, 'uri', None)
-            return ConnectionManager.create_connection('cflib', uri=uri)
-
-        elif connection_type.lower() == 'simulator':
-            host = getattr(config, 'sim_host', 'localhost')
-            port = getattr(config, 'sim_port', 8000)
-            return ConnectionManager.create_connection('simulator', host=host, port=port)
-
-        else:
-            raise ValueError(f"Unknown connection type in config: {connection_type}")

@@ -98,6 +98,12 @@ class Ros2VisClient(Node):
             "roll_kp": 0.0, "roll_ki": 0.0, "roll_kd": 0.0, "roll_i_limit": 0.0,
             "pitch_kp": 0.0, "pitch_ki": 0.0, "pitch_kd": 0.0, "pitch_i_limit": 0.0,
             "yaw_kp": 0.0, "yaw_ki": 0.0, "yaw_kd": 0.0, "yaw_i_limit": 0.0,
+            "x_kp": 0.0, "x_ki": 0.0, "x_kd": 0.0, "x_i_limit": 0.0,
+            "y_kp": 0.0, "y_ki": 0.0, "y_kd": 0.0, "y_i_limit": 0.0,
+            "z_kp": 0.0, "z_ki": 0.0, "z_kd": 0.0, "z_i_limit": 0.0,
+            "vx_kp": 0.0, "vx_ki": 0.0, "vx_kd": 0.0, "vx_i_limit": 0.0,
+            "vy_kp": 0.0, "vy_ki": 0.0, "vy_kd": 0.0, "vy_i_limit": 0.0,
+            "vz_kp": 0.0, "vz_ki": 0.0, "vz_kd": 0.0, "vz_i_limit": 0.0,
         }
         for name, val in defaults.items():
             self.declare_parameter(name, val)
@@ -114,12 +120,18 @@ class Ros2VisClient(Node):
             self.set_parameters([Parameter(name, value=value)])
 
         pid_map = {
-            "pid_roll_rate": "roll_rate",
-            "pid_pitch_rate": "pitch_rate",
-            "pid_yaw_rate": "yaw_rate",
-            "pid_roll": "roll",
-            "pid_pitch": "pitch",
-            "pid_yaw": "yaw",
+            "roll_rate": "roll_rate",
+            "pitch_rate": "pitch_rate",
+            "yaw_rate": "yaw_rate",
+            "roll": "roll",
+            "pitch": "pitch",
+            "yaw": "yaw",
+            "pos_x": "x",
+            "pos_y": "y",
+            "pos_z": "z",
+            "vel_x": "vx",
+            "vel_y": "vy",
+            "vel_z": "vz",
         }
         for key, prefix in pid_map.items():
             gains = params.get(key, {})
@@ -131,14 +143,28 @@ class Ros2VisClient(Node):
     def _on_params_updated(self, params):
         """Push modified params back to simulator REST."""
         payload = {}
+        prefix_map = {
+            "roll_rate": "roll_rate",
+            "pitch_rate": "pitch_rate",
+            "yaw_rate": "yaw_rate",
+            "roll": "roll",
+            "pitch": "pitch",
+            "yaw": "yaw",
+            "x": "pos_x",
+            "y": "pos_y",
+            "z": "pos_z",
+            "vx": "vel_x",
+            "vy": "vel_y",
+            "vz": "vel_z",
+        }
         for p in params:
             if not isinstance(p.value, (int, float)):
                 continue
             name = p.name
-            for prefix in ["roll_rate", "pitch_rate", "yaw_rate", "roll", "pitch", "yaw"]:
-                if name.startswith(prefix + "_"):
-                    field = name[len(prefix) + 1 :]
-                    payload.setdefault(prefix, {})[field] = float(p.value)
+            for ros_prefix, ctrl_key in prefix_map.items():
+                if name.startswith(ros_prefix + "_"):
+                    field = name[len(ros_prefix) + 1 :]
+                    payload.setdefault(ctrl_key, {})[field] = float(p.value)
                     break
 
         if payload:
