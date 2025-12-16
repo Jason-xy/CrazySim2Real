@@ -181,9 +181,8 @@ class Ros2VisClient(Node):
 
         sim_ts = dbg.get("timestamp") if isinstance(dbg, dict) else None
         if sim_ts is None:
-            stamp = self.get_clock().now().to_msg()
-        else:
-            stamp = Time(seconds=float(sim_ts)).to_msg()
+            raise RuntimeError("Controller debug payload missing 'timestamp' field")
+        stamp = Time(seconds=float(sim_ts)).to_msg()
 
         att_sp = dbg.get("attitude_desired")
         att = dbg.get("attitude")

@@ -7,8 +7,7 @@ to ensure consistency between simulation and controller.
 from crazyflie_sim.controllers.cf_controller import config as cf_config
 
 # Simulation parameters
-SIM_FREQUENCY = 150 # Hz
-SIM_DT = 1.0 / SIM_FREQUENCY
+SIM_DT = cf_config.ATTITUDE_UPDATE_DT  # Simulation timestep (s)
 
 # Physics parameters (from CF2.1 BL firmware)
 PHYSICS = {
