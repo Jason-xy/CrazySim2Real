@@ -2,13 +2,11 @@
 connection_type: "cflib"  # Use real Crazyflie hardware
 uri: "radio://0/80/2M/E7E7E7E7E6"  # Radio URI for the Crazyflie
 
-# Common flight parameters
-hover_thrust: 46000
-takeoff_thrust_initial: 46000
-
 # Safety limits
 safety_max_roll_pitch_deg: 15.0
 safety_max_thrust: 48000
 safety_min_thrust_flight: 20000
-safety_radius_m: 2.5
-safety_max_height_m: 2.0
+safety_radius_m: 5.0
+safety_max_height_m: 3.0
+log_rate_hz: 100
+yaw_rate_log_sign: -1

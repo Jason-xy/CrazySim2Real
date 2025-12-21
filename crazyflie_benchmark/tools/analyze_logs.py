@@ -11,6 +11,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 import pandas as pd
 import tkinter as tk
 from tkinter import ttk
+import numpy as np
 
 def analyze_log(log_file, save_plots=False, output_dir=None):
     if not os.path.exists(log_file):
@@ -50,6 +51,81 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
             return telem_df[col].to_numpy()
         return df[col].to_numpy()
 
+    def get_telem_xy(col: str):
+        """Return (t, y) for a telemetry column with NaNs removed.
+
+        Logs from cflib often interleave multiple LogConfigs, so a given column
+        is present only on some rows. If we plot the raw series directly, we
+        can end up with isolated points (separated by NaNs) and a line plot
+        will appear empty. Filtering fixes that.
+        """
+        if col not in telem_df.columns or telem_df.empty:
+            return None, None
+        t = pd.to_numeric(telem_df['timestamp'], errors='coerce')
+        y = pd.to_numeric(telem_df[col], errors='coerce')
+        mask = t.notna() & y.notna()
+        if not mask.any():
+            return None, None
+        return t[mask].to_numpy(), y[mask].to_numpy()
+
+    def get_telem_yaw_rate():
+        """Return (t, yaw_rate_deg_s) for actual yaw rate.
+
+        Prefer gyro.z if available. Otherwise derive yaw rate from stabilizer.yaw
+        using unwrap to avoid 180/-180 discontinuities.
+        """
+        if 'gyro.z' in telem_df.columns:
+            return get_telem_xy('gyro.z')
+
+        if 'stabilizer.yaw' not in telem_df.columns or telem_df.empty:
+            return None, None
+
+        t = pd.to_numeric(telem_df['timestamp'], errors='coerce')
+        yaw_deg = pd.to_numeric(telem_df['stabilizer.yaw'], errors='coerce')
+        mask = t.notna() & yaw_deg.notna()
+        if not mask.any():
+            return None, None
+
+        t = t[mask].to_numpy()
+        yaw_deg = yaw_deg[mask].to_numpy()
+
+        # Unwrap in radians to avoid jumps at +/-180 (or +/-pi).
+        yaw_rad = np.deg2rad(yaw_deg)
+        yaw_unwrapped_deg = np.rad2deg(np.unwrap(yaw_rad))
+
+        # Numerical derivative (deg/s). Requires strictly increasing time.
+        if t.size < 2:
+            return None, None
+        if not np.all(np.diff(t) > 0):
+            order = np.argsort(t)
+            t = t[order]
+            yaw_unwrapped_deg = yaw_unwrapped_deg[order]
+        dt = np.diff(t)
+        if np.any(dt <= 0):
+            return None, None
+
+        yaw_rate = np.gradient(yaw_unwrapped_deg, t)
+        return t, yaw_rate
+
+    def get_telem_xy_pair(col_x: str, col_y: str):
+        """Return (x, y) from telemetry with NaNs removed for both axes."""
+        if telem_df.empty:
+            return None, None
+        if col_x not in telem_df.columns or col_y not in telem_df.columns:
+            return None, None
+        x = pd.to_numeric(telem_df[col_x], errors='coerce')
+        y = pd.to_numeric(telem_df[col_y], errors='coerce')
+        mask = x.notna() & y.notna()
+        if not mask.any():
+            return None, None
+        return x[mask].to_numpy(), y[mask].to_numpy()
+
+    def first_existing_col(candidates, frame):
+        for c in candidates:
+            if c in frame.columns:
+                return c
+        return None
+
     def state_segments() -> List[Tuple[float, float, str]]:
         if 'state' not in telem_df.columns or telem_df.empty:
             return []
@@ -85,7 +161,9 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
         # Plot 1: Attitude (Roll/Pitch)
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 1, 1)
-        plt.plot(get_data('timestamp'), get_data('stabilizer.roll'), label='Roll (Actual)', linestyle='-')
+        t, y = get_telem_xy('stabilizer.roll')
+        if t is not None:
+            plt.plot(t, y, label='Roll (Actual)', linestyle='-')
         if 'cmd_roll' in cmd_df.columns and not cmd_df.empty:
             plt.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_roll'].to_numpy(),
                         color='r', s=12, label='Roll (Cmd)', alpha=0.8)
@@ -96,7 +174,9 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
         shade_states(plt.gca())
 
         plt.subplot(2, 1, 2)
-        plt.plot(get_data('timestamp'), get_data('stabilizer.pitch'), label='Pitch (Actual)', linestyle='-')
+        t, y = get_telem_xy('stabilizer.pitch')
+        if t is not None:
+            plt.plot(t, y, label='Pitch (Actual)', linestyle='-')
         if 'cmd_pitch' in cmd_df.columns and not cmd_df.empty:
             plt.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_pitch'].to_numpy(),
                         color='r', s=12, label='Pitch (Cmd)', alpha=0.8)
@@ -113,8 +193,11 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
         # Plot 2: Position & Thrust
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 1, 1)
-        if 'position.z' in df.columns:
-            plt.plot(get_data('timestamp'), get_data('position.z'), label='Z (Height)')
+        z_col = first_existing_col(['position.z', 'kalman.stateZ', 'stateEstimate.z'], df)
+        if z_col:
+            t, y = get_telem_xy(z_col)
+            if t is not None:
+                plt.plot(t, y, label=f'Z (Actual) [{z_col}]')
         plt.ylabel('Height (m)')
         plt.legend()
         plt.grid(True)
@@ -122,6 +205,10 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
         shade_states(plt.gca())
 
         plt.subplot(2, 1, 2)
+        if 'stabilizer.thrust' in telem_df.columns and not telem_df.empty:
+            t, y = get_telem_xy('stabilizer.thrust')
+            if t is not None:
+                plt.plot(t, y, label='Thrust (Actual) [stabilizer.thrust]', linestyle='-')
         if 'cmd_thrust' in cmd_df.columns and not cmd_df.empty:
             plt.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_thrust'].to_numpy(),
                         label='Thrust (Cmd)', color='g', s=12, alpha=0.8)
@@ -136,9 +223,13 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
         plt.close()
 
         # Plot 3: Trajectory (X-Y)
-        if 'position.x' in df.columns and 'position.y' in df.columns:
+        x_col = first_existing_col(['position.x', 'kalman.stateX', 'stateEstimate.x'], df)
+        y_col = first_existing_col(['position.y', 'kalman.stateY', 'stateEstimate.y'], df)
+        if x_col and y_col:
             plt.figure(figsize=(8, 8))
-            plt.plot(get_data('position.x'), get_data('position.y'), label='Trajectory')
+            x, y = get_telem_xy_pair(x_col, y_col)
+            if x is not None:
+                plt.plot(x, y, label=f'Trajectory [{x_col}, {y_col}]')
             plt.xlabel('X (m)')
             plt.ylabel('Y (m)')
             plt.title(f'XY Trajectory - {base_name}')
@@ -187,7 +278,9 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
             def build_attitude_tab(self):
                 fig = Figure(figsize=(9, 7), dpi=100)
                 ax1 = fig.add_subplot(3, 1, 1)
-                ax1.plot(get_data('timestamp'), get_data('stabilizer.roll'), label='Roll (Actual)', linestyle='-')
+                t, y = get_telem_xy('stabilizer.roll')
+                if t is not None:
+                    ax1.plot(t, y, label='Roll (Actual)', linestyle='-')
                 if 'cmd_roll' in cmd_df.columns and not cmd_df.empty:
                     ax1.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_roll'].to_numpy(),
                                 color='r', s=12, label='Roll (Cmd)', alpha=0.8)
@@ -198,7 +291,9 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
                 shade_states(ax1)
 
                 ax2 = fig.add_subplot(3, 1, 2)
-                ax2.plot(get_data('timestamp'), get_data('stabilizer.pitch'), label='Pitch (Actual)', linestyle='-')
+                t, y = get_telem_xy('stabilizer.pitch')
+                if t is not None:
+                    ax2.plot(t, y, label='Pitch (Actual)', linestyle='-')
                 if 'cmd_pitch' in cmd_df.columns and not cmd_df.empty:
                     ax2.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_pitch'].to_numpy(),
                                 color='r', s=12, label='Pitch (Cmd)', alpha=0.8)
@@ -208,11 +303,9 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
                 shade_states(ax2)
 
                 ax3 = fig.add_subplot(3, 1, 3)
-                # Prefer gyro z (deg/s) for yaw rate if available
-                if 'gyro.z' in telem_df.columns:
-                    ax3.plot(get_data('timestamp'), get_data('gyro.z'), label='Yaw Rate (Actual)', linestyle='-')
-                elif 'stabilizer.yaw' in telem_df.columns:
-                    ax3.plot(get_data('timestamp'), get_data('stabilizer.yaw'), label='Yaw (deg) (Actual)', linestyle='-')
+                t, y = get_telem_yaw_rate()
+                if t is not None:
+                    ax3.plot(t, y, label='Yaw Rate (Actual)', linestyle='-')
                 if 'cmd_yaw_rate' in cmd_df.columns and not cmd_df.empty:
                     ax3.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_yaw_rate'].to_numpy(),
                                 color='r', s=12, label='Yaw Rate (Cmd)', alpha=0.8)
@@ -228,8 +321,11 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
             def build_position_tab(self):
                 fig = Figure(figsize=(8, 6), dpi=100)
                 ax1 = fig.add_subplot(2, 1, 1)
-                if 'position.z' in self.df.columns:
-                    ax1.plot(get_data('timestamp'), get_data('position.z'), label='Z (Height)')
+                z_col = first_existing_col(['position.z', 'kalman.stateZ', 'stateEstimate.z'], self.df)
+                if z_col:
+                    t, y = get_telem_xy(z_col)
+                    if t is not None:
+                        ax1.plot(t, y, label=f'Z (Actual) [{z_col}]')
                 ax1.set_ylabel('Height (m)')
                 ax1.legend()
                 ax1.grid(True)
@@ -237,6 +333,10 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
                 shade_states(ax1)
 
                 ax2 = fig.add_subplot(2, 1, 2)
+                if 'stabilizer.thrust' in telem_df.columns and not telem_df.empty:
+                    t, y = get_telem_xy('stabilizer.thrust')
+                    if t is not None:
+                        ax2.plot(t, y, label='Thrust (Actual) [stabilizer.thrust]', linestyle='-')
                 if 'cmd_thrust' in cmd_df.columns and not cmd_df.empty:
                     ax2.scatter(cmd_df['timestamp'].to_numpy(), cmd_df['cmd_thrust'].to_numpy(),
                                 label='Thrust (Cmd)', color='g', s=12, alpha=0.8)
@@ -252,8 +352,12 @@ def analyze_log(log_file, save_plots=False, output_dir=None):
             def build_traj_tab(self):
                 fig = Figure(figsize=(7, 6), dpi=100)
                 ax = fig.add_subplot(1, 1, 1)
-                if 'position.x' in self.df.columns and 'position.y' in self.df.columns:
-                    ax.plot(get_data('position.x'), get_data('position.y'), label='Trajectory')
+                x_col = first_existing_col(['position.x', 'kalman.stateX', 'stateEstimate.x'], self.df)
+                y_col = first_existing_col(['position.y', 'kalman.stateY', 'stateEstimate.y'], self.df)
+                if x_col and y_col:
+                    x, y = get_telem_xy_pair(x_col, y_col)
+                    if x is not None:
+                        ax.plot(x, y, label=f'Trajectory [{x_col}, {y_col}]')
                     ax.set_xlabel('X (m)')
                     ax.set_ylabel('Y (m)')
                     ax.set_title(f'XY Trajectory - {self.base_name}')

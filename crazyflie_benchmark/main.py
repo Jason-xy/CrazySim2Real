@@ -107,7 +107,7 @@ class BenchmarkRunner:
             self.logger.set_state("hover_measure")
             # Measure hover thrust fresh before each test
             measured = measure_hover_thrust(self.controller, self.logger)
-            if measured is None:
+            if measured is None or measured <= 0:
                 logger.error("Stopping: hover thrust measurement failed before test run.")
                 break
             self.config.hover_thrust = measured

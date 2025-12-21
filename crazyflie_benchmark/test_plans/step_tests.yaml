@@ -4,20 +4,20 @@ tests:
   # Step tests
   - type: "step"
     channel: "roll"
-    amplitude: 5.0  # degrees
-    duration: 1.5   # seconds
+    amplitude: 10.0  # degrees
+    duration: 1.0   # seconds
 
   - type: "step"
     channel: "pitch"
-    amplitude: 5.0  # degrees
-    duration: 1.5   # seconds
+    amplitude: 10.0  # degrees
+    duration: 1.0   # seconds
 
   - type: "step"
     channel: "yaw"
-    amplitude: 30.0  # deg/s yaw rate
-    duration: 1.5   # seconds
+    amplitude: 60.0  # deg/s yaw rate
+    duration: 1.0   # seconds
 
-  - type: "step"
-    channel: "thrust"
-    amplitude: 1000  # raw thrust units
-    duration: 1.5   # seconds
+  # - type: "step"
+  #   channel: "thrust"
+  #   amplitude: 1000  # raw thrust units
+  #   duration: 1.0   # seconds

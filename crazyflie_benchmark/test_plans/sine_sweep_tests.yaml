@@ -23,9 +23,9 @@ tests:
     start_freq: 0.5
     end_freq: 4.0
 
-  - type: "sine_sweep"
-    channel: "thrust"
-    amplitude: 1000  # raw thrust units
-    duration: 6.0   # seconds
-    start_freq: 0.5
-    end_freq: 4.0
+  # - type: "sine_sweep"
+  #   channel: "thrust"
+  #   amplitude: 1000  # raw thrust units
+  #   duration: 6.0   # seconds
+  #   start_freq: 0.5
+  #   end_freq: 4.0

@@ -25,7 +25,11 @@ def measure_hover_thrust(controller, logger_obj, sample_time: float = 3) -> Opti
         int hover thrust on success, or None on failure.
     """
     pos = logger_obj.get_current_position()
-    target_height = pos.get("z", 0.5)
+    target_height = float(pos.get("z", 0.0) or 0.0)
+    # If position telemetry isn't ready, get_current_position() returns 0.0.
+    # Commanding z=0 would immediately force a descent and corrupt the measurement.
+    if target_height <= 0.05:
+        target_height = 0.5
 
     samples = []
     dt = controller.CONTROL_PERIOD
@@ -44,7 +48,9 @@ def measure_hover_thrust(controller, logger_obj, sample_time: float = 3) -> Opti
                 except (ValueError, TypeError):
                     continue
         if thrust_val is not None:
-            samples.append(thrust_val)
+            # Ignore obviously-invalid samples.
+            if thrust_val > 0:
+                samples.append(thrust_val)
         next_tick += dt
         sleep_time = next_tick - time.monotonic()
         if sleep_time > 0:
@@ -53,9 +59,12 @@ def measure_hover_thrust(controller, logger_obj, sample_time: float = 3) -> Opti
             next_tick = time.monotonic()
 
     if not samples:
-        logger.error("Hover thrust measurement failed: no telemetry samples.")
+        logger.error("Hover thrust measurement failed: no valid thrust telemetry samples.")
         return None
 
     measured = int(sum(samples) / len(samples))
+    if measured <= 0:
+        logger.error("Hover thrust measurement failed: measured thrust is non-positive.")
+        return None
     logger.info(f"Measured hover thrust from logs: {measured}")
     return measured

@@ -63,12 +63,14 @@ class FlightLogger:
         timestamp = self._current_time()
         with self._state_lock:
             state = self._state
+
+        yaw_rate_logged = float(yaw_rate) * float(getattr(self.config, 'yaw_rate_log_sign', 1.0))
         with self._lock:
             self._data.append({
                 'timestamp': timestamp,
                 'cmd_roll': roll,
                 'cmd_pitch': pitch,
-                'cmd_yaw_rate': yaw_rate,
+                'cmd_yaw_rate': yaw_rate_logged,
                 'cmd_thrust': thrust,
                 'type': 'command',
                 'state': state
@@ -196,13 +198,65 @@ class FlightLogger:
             self._data.append(entry)
 
     def get_latest_telemetry(self) -> Dict[str, Any]:
+        def _is_nan(v: Any) -> bool:
+            try:
+                return v != v  # NaN is not equal to itself
+            except Exception:
+                return False
+
+        # cflib telemetry arrives in multiple LogConfigs (Attitude/Position/Velocity).
+        # Each callback may contain only a subset of keys, so the single "latest" row
+        # can be incomplete. To avoid treating missing fields as zeros, assemble a
+        # snapshot at *read time* by filling missing keys from the most recent nearby
+        # telemetry frames.
+        max_age_s = 5.0
+
         with self._lock:
-            if self._data:
-                # Find last telemetry entry
-                for i in range(len(self._data)-1, -1, -1):
-                    if self._data[i].get('type') == 'telemetry':
-                        return self._data[i].copy()
-        return {}
+            if not self._data:
+                return {}
+
+            # Find last telemetry entry
+            last_idx: Optional[int] = None
+            for i in range(len(self._data) - 1, -1, -1):
+                if self._data[i].get('type') == 'telemetry':
+                    last_idx = i
+                    break
+
+            if last_idx is None:
+                return {}
+
+            merged = self._data[last_idx].copy()
+            latest_ts = merged.get('timestamp')
+            if latest_ts is None:
+                return merged
+
+            # Fill only missing/None/NaN keys from earlier telemetry within a short window.
+            for j in range(last_idx - 1, -1, -1):
+                row = self._data[j]
+                if row.get('type') != 'telemetry':
+                    continue
+
+                ts = row.get('timestamp')
+                if ts is None:
+                    continue
+                try:
+                    if (latest_ts - ts) > max_age_s:
+                        break
+                except TypeError:
+                    # If timestamps aren't comparable, just stop merging.
+                    break
+
+                filled_any = False
+                for k, v in row.items():
+                    if k not in merged or merged[k] is None or _is_nan(merged[k]):
+                        merged[k] = v
+                        filled_any = True
+
+                # If this row didn't help fill anything, keep scanning.
+                # If it did, we still keep scanning until the time window ends,
+                # because different keys may live in different log configs.
+
+            return merged
 
     def get_current_position(self) -> Dict[str, float]:
         telem = self.get_latest_telemetry()

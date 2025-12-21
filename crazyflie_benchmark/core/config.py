@@ -49,6 +49,7 @@ class FlightConfig:
 
     # Maneuver parameters
     default_yaw_rate: float = 0.0  # Default yaw rate (deg/s)
+    yaw_rate_log_sign: float = 1.0  # Sign applied when logging cmd_yaw_rate (does not affect control)
     test_roll_angle_deg: float = 8.0  # Test roll angle in degrees
     test_pitch_angle_deg: float = 8.0  # Test pitch angle in degrees
     test_thrust_increment: int = 4000  # Test thrust increment/decrement
