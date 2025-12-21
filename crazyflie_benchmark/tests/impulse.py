@@ -92,12 +92,13 @@ class ImpulseTest(TestStrategy):
             f"YawRate: {yaw_rate_val}°/s, Thrust: {target_thrust} for {self.duration}s"
         )
 
-        # Send the impulse commands continuously for the impulse duration
-        start_time = time.time()
+        # Send the impulse commands continuously for the impulse duration.
+        # Use logger time to keep durations aligned with simulator timestamps.
+        start_time = self.logger.get_time()
         test_successful = True
 
         # Phase 1: Apply impulse
-        while time.time() - start_time < self.duration:
+        while self.logger.get_time() - start_time < self.duration:
             # Check safety limits before sending command
             if not self.check_safety():
                 logger.warning(
@@ -119,9 +120,9 @@ class ImpulseTest(TestStrategy):
                 f"Impulse complete. Measuring recovery for {self.recovery_duration}s"
             )
 
-            recovery_start_time = time.time()
+            recovery_start_time = self.logger.get_time()
 
-            while time.time() - recovery_start_time < self.recovery_duration:
+            while self.logger.get_time() - recovery_start_time < self.recovery_duration:
                 # Check safety limits before sending command
                 if not self.check_safety():
                     logger.warning(

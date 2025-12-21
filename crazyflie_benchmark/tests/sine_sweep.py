@@ -76,12 +76,13 @@ class SineSweepTest(TestStrategy):
         logger.info(f"Starting sine sweep from {self.start_freq}Hz to {self.end_freq}Hz "
                   f"over {self.duration}s with amplitude {self.amplitude}")
 
-        # Send the sine sweep commands continuously for the duration
-        start_time = time.time()
-        next_tick = start_time
+        # Send the sine sweep commands continuously for the duration.
+        # Use logger time to keep the sweep schedule aligned with simulator timestamps.
+        start_time = self.logger.get_time()
+        next_tick = time.monotonic()
         test_successful = True
 
-        while time.time() - start_time < self.duration:
+        while self.logger.get_time() - start_time < self.duration:
             # Check safety limits before sending command
             if not self.check_safety():
                 logger.warning(f"Sine sweep test on {self.channel} interrupted due to safety concerns!")
@@ -89,7 +90,7 @@ class SineSweepTest(TestStrategy):
                 break
 
             # Calculate elapsed time
-            elapsed = time.time() - start_time
+            elapsed = self.logger.get_time() - start_time
 
             # Calculate current frequency using logarithmic sweep
             current_freq = self.start_freq * math.exp(sweep_rate * elapsed)
@@ -128,10 +129,10 @@ class SineSweepTest(TestStrategy):
 
             # Maintain controller control rate
             next_tick += self.controller.CONTROL_PERIOD
-            sleep_time = next_tick - time.time()
+            sleep_time = next_tick - time.monotonic()
             if sleep_time > 0:
                 time.sleep(sleep_time)
             else:
-                next_tick = time.time()
+                next_tick = time.monotonic()
 
         return test_successful

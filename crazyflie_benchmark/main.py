@@ -191,6 +191,14 @@ class BenchmarkRunner:
 
         self.logger.start()
 
+        # Align duration-based control loops (e.g., hover holds) with the
+        # simulator/vehicle timestamp rather than host wall clock.
+        # Wait briefly for the first telemetry timestamp so get_time() can advance.
+        t_wait = time.monotonic()
+        while self.logger.get_time() <= 0.0 and (time.monotonic() - t_wait) < 2.0:
+            time.sleep(0.05)
+        self.controller.set_time_source(self.logger.get_time)
+
         # Reset simulator if applicable
         if self.config.connection_type == 'simulator':
             logger.info("Resetting simulator...")

@@ -87,11 +87,12 @@ class StepTest(TestStrategy):
             f"YawRate: {yaw_rate_val}°/s, Thrust: {target_thrust} for {self.duration}s"
         )
 
-        # Send the step input commands continuously for the duration
-        start_time = time.time()
+        # Send the step input commands continuously for the duration.
+        # Use logger time to keep durations aligned with simulator timestamps.
+        start_time = self.logger.get_time()
         test_successful = True
 
-        while time.time() - start_time < self.duration:
+        while self.logger.get_time() - start_time < self.duration:
             # Check safety limits before sending command
             if not self.check_safety():
                 logger.warning(

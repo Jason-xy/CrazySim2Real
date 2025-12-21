@@ -7,5 +7,5 @@ sim_port: 8000  # Simulator port
 safety_max_roll_pitch_deg: 15.0
 safety_max_thrust: 65535
 safety_min_thrust_flight: 10000
-safety_radius_m: 2.5
-safety_max_height_m: 2.0
+safety_radius_m: 10.0
+safety_max_height_m: 3.0

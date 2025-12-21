@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import time
 import logging
-from typing import Optional
+from typing import Optional, Callable
 from ..core.config import FlightConfig
 from ..core.connection import DroneConnectionBase
 from ..core.utils import clamp
@@ -18,8 +18,22 @@ class FlightController(ABC):
         self.is_armed = False
         self._setpoint_initialized = False
         self._current_height = 0.0
+        # Time source for duration-based logic (e.g. tests) can be overridden
+        # to align with simulator/vehicle timestamps.
+        self._time_source: Callable[[], float] = time.monotonic
         self.CONTROL_RATE_HZ = 100
         self.CONTROL_PERIOD = 1.0 / self.CONTROL_RATE_HZ
+
+    def set_time_source(self, time_source: Callable[[], float]) -> None:
+        """Override the clock used for duration-based loops.
+
+        In simulation, pass FlightLogger.get_time() to align plan durations with
+        simulator timestamps. Wall-clock pacing (sleep) still uses monotonic time.
+        """
+        self._time_source = time_source
+
+    def _now(self) -> float:
+        return float(self._time_source())
 
     @property
     def is_connected(self) -> bool:
@@ -106,11 +120,11 @@ class FlightController(ABC):
 
         # Ramp up
         max_time = target_height / velocity
-        start_time = time.monotonic()
+        start_time = self._now()
         next_control_time = time.monotonic()
 
-        while time.monotonic() - start_time < max_time + 1.0:
-            elapsed = time.monotonic() - start_time
+        while self._now() - start_time < max_time + 1.0:
+            elapsed = self._now() - start_time
             progress = min(elapsed / max_time, 1.0)
             current_target = target_height * progress
 
@@ -161,10 +175,10 @@ class FlightController(ABC):
 
     def maintain_hover(self, duration_s: float, target_height: float = 0.5) -> bool:
         logger.info(f"HOVER: Maintaining {target_height}m for {duration_s}s")
-        start_time = time.monotonic()
+        start_time = self._now()
         next_control_time = time.monotonic()
 
-        while time.monotonic() - start_time < duration_s:
+        while self._now() - start_time < duration_s:
             if not self.send_hover_setpoint(0, 0, 0, target_height):
                 return False
 

@@ -8,7 +8,9 @@ logger = logging.getLogger(__name__)
 
 class SimFlightController(FlightController):
     MAX_ROLL_PITCH_DEG = 30.0   # ±30deg -> ±1.0 (matches firmware)
-    MAX_YAW_RATE_DEG = 200.0    # ±200deg/s -> ±1.0
+    # Keep consistent with crazyflie_sim controller scaling:
+    # normalized yaw_rate [-1, 1] -> [-120, 120] deg/s.
+    MAX_YAW_RATE_DEG = 120.0
 
     def arm(self) -> bool:
         self.is_armed = True
