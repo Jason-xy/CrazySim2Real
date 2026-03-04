@@ -9,10 +9,10 @@ import math
 import time
 from typing import Dict, Optional, Tuple
 
-from ..config import FlightConfig
-from ..controller import FlightController
-from ..safety import SafetyMonitor
-from ..logging_manager import LoggingManager
+from ..core.config import FlightConfig
+from ..controllers.base import FlightController
+from ..core.safety import SafetyMonitor
+from ..core.logger import FlightLogger
 from .base import TestStrategy
 
 logger = logging.getLogger(__name__)
@@ -30,12 +30,12 @@ class SineSweepTest(TestStrategy):
                 controller: FlightController,
                 config: FlightConfig,
                 safety_monitor: SafetyMonitor,
-                logging_manager: LoggingManager,
+                logger_instance: FlightLogger,
                 channel: str,
                 amplitude: float,
-                duration: Optional[float] = None,
-                start_freq: Optional[float] = None,
-                end_freq: Optional[float] = None):
+                duration: float,
+                start_freq: float,
+                end_freq: float):
         """
         Initialize the sine sweep test strategy.
 
@@ -43,20 +43,20 @@ class SineSweepTest(TestStrategy):
             controller: Flight controller for sending commands
             config: Configuration parameters
             safety_monitor: Safety monitor for checking safety limits
-            logging_manager: Logging manager for recording test data
+            logger_instance: Logging manager for recording test data
             channel: The channel to test ('roll', 'pitch', or 'thrust')
             amplitude: Amplitude of the sine wave (degrees for roll/pitch, thrust units for thrust)
             duration: Duration of the sweep (if None, uses config.sine_sweep_duration)
             start_freq: Starting frequency in Hz (if None, uses config.sine_start_freq)
             end_freq: Ending frequency in Hz (if None, uses config.sine_end_freq)
         """
-        super().__init__(controller, config, safety_monitor, logging_manager)
+        super().__init__(controller, config, safety_monitor, logger_instance)
 
         self.channel = channel
         self.amplitude = amplitude
-        self.duration = duration if duration is not None else config.sine_sweep_duration
-        self.start_freq = start_freq if start_freq is not None else config.sine_start_freq
-        self.end_freq = end_freq if end_freq is not None else config.sine_end_freq
+        self.duration = duration
+        self.start_freq = start_freq
+        self.end_freq = end_freq
 
         # Set test name and description
         self.test_name = f"sine_sweep_{channel}_{amplitude}"
@@ -76,11 +76,13 @@ class SineSweepTest(TestStrategy):
         logger.info(f"Starting sine sweep from {self.start_freq}Hz to {self.end_freq}Hz "
                   f"over {self.duration}s with amplitude {self.amplitude}")
 
-        # Send the sine sweep commands continuously for the duration
-        start_time = time.time()
+        # Send the sine sweep commands continuously for the duration.
+        # Use logger time to keep the sweep schedule aligned with simulator timestamps.
+        start_time = self.logger.get_time()
+        next_tick = time.monotonic()
         test_successful = True
 
-        while time.time() - start_time < self.duration:
+        while self.logger.get_time() - start_time < self.duration:
             # Check safety limits before sending command
             if not self.check_safety():
                 logger.warning(f"Sine sweep test on {self.channel} interrupted due to safety concerns!")
@@ -88,7 +90,7 @@ class SineSweepTest(TestStrategy):
                 break
 
             # Calculate elapsed time
-            elapsed = time.time() - start_time
+            elapsed = self.logger.get_time() - start_time
 
             # Calculate current frequency using logarithmic sweep
             current_freq = self.start_freq * math.exp(sweep_rate * elapsed)
@@ -115,8 +117,9 @@ class SineSweepTest(TestStrategy):
             target_thrust = self.config.hover_thrust + thrust_offset
 
             # Send the command and log it
+            self.logger.log_command(roll, pitch, yaw_rate_val, target_thrust)
             self.controller.send_setpoint(
-                roll, pitch, yaw_rate_val, target_thrust, logging_manager=self.logging_manager
+                roll, pitch, yaw_rate_val, target_thrust
             )
 
             # Log progress periodically
@@ -124,7 +127,12 @@ class SineSweepTest(TestStrategy):
                 logger.debug(f"Sweep progress: {elapsed:.1f}s / {self.duration:.1f}s, "
                            f"freq: {current_freq:.2f}Hz")
 
-            # Sleep a small amount to achieve approximately 100Hz update rate
-            time.sleep(0.01)
+            # Maintain controller control rate
+            next_tick += self.controller.CONTROL_PERIOD
+            sleep_time = next_tick - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            else:
+                next_tick = time.monotonic()
 
         return test_successful

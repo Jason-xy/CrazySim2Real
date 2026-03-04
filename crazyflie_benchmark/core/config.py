@@ -49,6 +49,7 @@ class FlightConfig:
 
     # Maneuver parameters
     default_yaw_rate: float = 0.0  # Default yaw rate (deg/s)
+    yaw_rate_log_sign: float = 1.0  # Sign applied when logging cmd_yaw_rate (does not affect control)
     test_roll_angle_deg: float = 8.0  # Test roll angle in degrees
     test_pitch_angle_deg: float = 8.0  # Test pitch angle in degrees
     test_thrust_increment: int = 4000  # Test thrust increment/decrement
@@ -87,29 +88,6 @@ class FlightConfig:
     })
 
     # Test parameters
-    # Note: These parameters define the maximum amplitudes.
-    # The actual test amplitudes will be reduced by a safety factor (0.7)
-    # in main.py to ensure the drone stays within safety limits.
-
-    # Step test parameters
-    step_test_amplitude_roll: float = 5.0  # Roll step amplitude (degrees)
-    step_test_amplitude_pitch: float = 5.0  # Pitch step amplitude (degrees)
-    step_test_amplitude_thrust: int = 2000  # Thrust step amplitude
-    step_test_duration: float = 1.5  # Step test duration (seconds)
-
-    # Impulse test parameters
-    impulse_amplitude_roll: float = 6.0  # Roll impulse amplitude (degrees)
-    impulse_amplitude_pitch: float = 6.0  # Pitch impulse amplitude (degrees)
-    impulse_amplitude_thrust: int = 2500  # Thrust impulse amplitude
-    impulse_duration: float = 0.2  # Impulse duration (seconds)
-
-    # Sine sweep test parameters
-    sine_sweep_duration: float = 8.0  # Sine sweep duration (seconds)
-    sine_start_freq: float = 0.5  # Start frequency (Hz)
-    sine_end_freq: float = 4.0  # End frequency (Hz)
-    sine_amplitude_roll: float = 3.0  # Roll sine amplitude (degrees)
-    sine_amplitude_pitch: float = 3.0  # Pitch sine amplitude (degrees)
-    sine_amplitude_thrust: int = 1200  # Thrust sine amplitude
 
     def __post_init__(self):
         """Validate configuration after initialization."""

@@ -56,6 +56,7 @@ BTN_A = 0   # Land
 BTN_B = 1   # Reset
 BTN_Y = 4   # Takeoff
 BTN_RB = 7  # Mode switch
+BTN_LB = 6  # Coordinate frame switch
 
 
 class ControlMode(enum.Enum):
@@ -138,12 +139,12 @@ class Controller:
         self.vel_scale = 1.0   # m/s
         self.yaw_deg_rate = 2.0  # deg per tick
 
-    def update(self, sticks: StickInput, state: Optional[DroneState]):
+    def update(self, sticks: StickInput, state: Optional[DroneState], bypass_body_transform: bool = False):
         with self.lock:
             if self.mode == ControlMode.ATTITUDE:
                 self._update_attitude(sticks)
             elif self.mode == ControlMode.VELOCITY:
-                self._update_velocity(sticks, state)
+                self._update_velocity(sticks, state, bypass_body_transform)
             elif self.mode == ControlMode.POSITION:
                 self._update_position(sticks, state)
 
@@ -160,14 +161,25 @@ class Controller:
         self.yaw_rate = max(-1.0, min(1.0, self.yaw_rate))
         self.thrust = max(0.0, min(1.0, self.thrust))
 
-    def _update_velocity(self, s: StickInput, state: Optional[DroneState]):
-        # Body frame velocity
+    def _update_velocity(self, s: StickInput, state: Optional[DroneState], bypass_body_transform: bool):
         # Right stick: forward/back (Y) and left/right strafe (X)
         # Left stick: yaw rate (X) and altitude (Y)
-        self.vx = -s.right_y * self.vel_scale   # Up = forward
-        self.vy = -s.right_x * self.vel_scale   # Right = strafe right
+        body_vx = -s.right_y * self.vel_scale   # Up = forward
+        body_vy = -s.right_x * self.vel_scale   # Right = strafe right
         self.vz = -s.left_y * self.vel_scale    # Up = climb
         self.yaw_rate = -s.left_x * 120.0       # Right = clockwise (deg/s)
+
+        if bypass_body_transform:
+            self.vx = body_vx
+            self.vy = body_vy
+            return
+
+        yaw_rad = 0.0
+        if state:
+            yaw_rad = math.radians(state.orientation.yaw)
+        # Body frame -> world frame
+        self.vx = body_vx * math.cos(yaw_rad) - body_vy * math.sin(yaw_rad)
+        self.vy = body_vx * math.sin(yaw_rad) + body_vy * math.cos(yaw_rad)
 
     def _update_position(self, s: StickInput, state: Optional[DroneState]):
         # Get yaw for body-to-world transform
@@ -296,6 +308,7 @@ class XboxHandler:
         self.network = network
         self.joystick = None
         self.sticks = StickInput()
+        self.lb_passthrough = False
         self._prev_buttons = {}
 
         pygame.init()
@@ -323,6 +336,7 @@ class XboxHandler:
         )
 
         nb = self.joystick.get_numbuttons()
+        self.lb_passthrough = self.joystick.get_button(BTN_LB) if nb > BTN_LB else False
         for btn in [BTN_A, BTN_B, BTN_Y, BTN_RB]:
             if btn >= nb:
                 continue
@@ -412,7 +426,7 @@ def main():
         while controller.running:
             t0 = time.time()
             xbox.update()
-            controller.update(xbox.sticks, network.get_state())
+            controller.update(xbox.sticks, network.get_state(), bypass_body_transform=xbox.lb_passthrough)
             display.render(network.get_state(), controller, xbox.sticks)
             time.sleep(max(0, DT - (time.time() - t0)))
     except KeyboardInterrupt:

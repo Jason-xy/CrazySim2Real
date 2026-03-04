@@ -429,11 +429,10 @@ class SimulationManager:
         self.robot.write_data_to_sim()
 
         # Reset robot to initial pose
-        # Note: Do NOT call self.sim.reset() - it invalidates PhysX references
         root_state = torch.zeros((1, 13), device=self.device)
         root_state[:, 0] = 0.0   # x
         root_state[:, 1] = 0.0   # y
-        root_state[:, 2] = 0.1   # z (10cm above ground)
+        root_state[:, 2] = 0.1   # z
         root_state[:, 3] = 1.0   # qw (identity quaternion)
         root_state[:, 4] = 0.0   # qx
         root_state[:, 5] = 0.0   # qy
@@ -471,41 +470,71 @@ class SimulationManager:
             "arm_length": self.arm_length,
             "inertia": self.inertia,
             "thrust_max": cf_config.THRUST_MAX,
-            "pid_roll_rate": {
+            "roll_rate": {
                 "kp": cf_config.PID_ROLL_RATE_KP,
                 "ki": cf_config.PID_ROLL_RATE_KI,
                 "kd": cf_config.PID_ROLL_RATE_KD,
                 "i_limit": cf_config.PID_ROLL_RATE_INTEGRATION_LIMIT,
             },
-            "pid_roll": {
+            "roll": {
                 "kp": cf_config.PID_ROLL_KP,
                 "ki": cf_config.PID_ROLL_KI,
                 "kd": cf_config.PID_ROLL_KD,
                 "i_limit": cf_config.PID_ROLL_INTEGRATION_LIMIT,
             },
-            "pid_pitch_rate": {
+            "pitch_rate": {
                 "kp": cf_config.PID_PITCH_RATE_KP,
                 "ki": cf_config.PID_PITCH_RATE_KI,
                 "kd": cf_config.PID_PITCH_RATE_KD,
                 "i_limit": cf_config.PID_PITCH_RATE_INTEGRATION_LIMIT,
             },
-            "pid_pitch": {
+            "pitch": {
                 "kp": cf_config.PID_PITCH_KP,
                 "ki": cf_config.PID_PITCH_KI,
                 "kd": cf_config.PID_PITCH_KD,
                 "i_limit": cf_config.PID_PITCH_INTEGRATION_LIMIT,
             },
-            "pid_yaw_rate": {
+            "yaw_rate": {
                 "kp": cf_config.PID_YAW_RATE_KP,
                 "ki": cf_config.PID_YAW_RATE_KI,
                 "kd": cf_config.PID_YAW_RATE_KD,
                 "i_limit": cf_config.PID_YAW_RATE_INTEGRATION_LIMIT,
             },
-            "pid_yaw": {
+            "yaw": {
                 "kp": cf_config.PID_YAW_KP,
                 "ki": cf_config.PID_YAW_KI,
                 "kd": cf_config.PID_YAW_KD,
                 "i_limit": cf_config.PID_YAW_INTEGRATION_LIMIT,
+            },
+            "pos_x": {
+                "kp": cf_config.PID_POS_X_KP,
+                "ki": cf_config.PID_POS_X_KI,
+                "kd": cf_config.PID_POS_X_KD,
+            },
+            "pos_y": {
+                "kp": cf_config.PID_POS_Y_KP,
+                "ki": cf_config.PID_POS_Y_KI,
+                "kd": cf_config.PID_POS_Y_KD,
+            },
+            "pos_z": {
+                "kp": cf_config.PID_POS_Z_KP,
+                "ki": cf_config.PID_POS_Z_KI,
+                "kd": cf_config.PID_POS_Z_KD,
+            },
+            "vel_x": {
+                "kp": cf_config.PID_VEL_X_KP,
+                "ki": cf_config.PID_VEL_X_KI,
+                "kd": cf_config.PID_VEL_X_KD,
+            },
+            "vel_y": {
+                "kp": cf_config.PID_VEL_Y_KP,
+                "ki": cf_config.PID_VEL_Y_KI,
+                "kd": cf_config.PID_VEL_Y_KD,
+            },
+            "vel_z": {
+                "kp": cf_config.PID_VEL_Z_KP,
+                "ki": cf_config.PID_VEL_Z_KI,
+                "kd": cf_config.PID_VEL_Z_KD,
             },
         }
 

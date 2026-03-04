@@ -126,10 +126,10 @@ cd crazyflie_benchmark
 python main.py --list-tests
 
 # Run a benchmark in simulation
-python main.py --config config/simulator_config.yaml --test-plan step_tests.yaml
+python main.py --config config/simulator_config.yaml --plan step_tests.yaml
 
 # Run a benchmark on real hardware
-python main.py --config config/hardware_config.yaml --test-plan step_tests.yaml
+python main.py --config config/hardware_config.yaml --plan step_tests.yaml
 ```
 
 ## Test Plans
@@ -151,33 +151,43 @@ tests:
     duration: 1.5   # seconds
 
   - type: "step"
-    channel: "pitch"
-    amplitude: 5.0  # degrees
-    duration: 1.5   # seconds
 ```
 
 ## Analyzing Results
 
-Test results are automatically logged in the `logs/` directory, with separate folders for simulation and real hardware tests. The framework provides tools for analyzing and visualizing test results:
+ Test results are automatically logged as CSV files in the `crazyflie_benchmark/logs/` directory.
 
-```bash
-# Analyze a specific test run
-python main.py --analyze logs/20250513_001722-step-real/
+ ### Single Log Analysis
+ Use the provided tool to generate plots and statistics:
+ ```bash
+ # Interactive mode (shows plots in window)
+ python crazyflie_benchmark/main.py --analyze crazyflie_benchmark/logs/flight_log_YYYYMMDD_HHMMSS.csv
 
-# Generate plots and metrics
-python main.py --analyze logs/20250513_001722-step-real/ --plots --metrics
-```
+ # Save plots to file
+ python crazyflie_benchmark/main.py --analyze crazyflie_benchmark/logs/flight_log_YYYYMMDD_HHMMSS.csv --save
+ ```
+ When using `--save`, plots will be saved in a new directory named after the log file.
 
-## Sim-to-Real Comparison
+ ## Sim-to-Real Comparison
 
-The framework enables direct comparison between simulation and real hardware performance:
+ To compare simulation and real hardware performance:
 
-```bash
-# Compare sim and real tests
-python main.py --compare logs/sim/20250513_005534-step-sim/ logs/real/20250513_001722-step-real/
-```
+ 1. Run the same test plan on both simulator and real hardware.
+ 2. Use the comparison tool:
+ ```bash
+ # Interactive mode
+ python crazyflie_benchmark/main.py --compare \
+   crazyflie_benchmark/logs/sim_log.csv \
+   crazyflie_benchmark/logs/real_log.csv \
+   --label1 "Simulation" --label2 "Real Hardware"
 
-This will generate comparative metrics and plots showing the differences between simulation and reality.
+ # Save comparison plots
+ python crazyflie_benchmark/main.py --compare \
+   crazyflie_benchmark/logs/sim_log.csv \
+   crazyflie_benchmark/logs/real_log.csv \
+   --label1 "Simulation" --label2 "Real Hardware" \
+   --save
+ ```
 
 ## Configuration
 
