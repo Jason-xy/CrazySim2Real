@@ -80,6 +80,7 @@ class SimulationManager:
         mass: float = cf_config.CF_MASS,
         arm_length: float = cf_config.ARM_LENGTH,
         inertia: tuple = (cf_config.INERTIA_XX, cf_config.INERTIA_YY, cf_config.INERTIA_ZZ),
+        recorder=None,
     ):
         """
         Initialize simulation manager.
@@ -90,12 +91,16 @@ class SimulationManager:
             mass: Drone mass (kg) - default CF2.1 BL
             arm_length: Motor arm length (m) - default CF2.1 BL
             inertia: Inertia tensor diagonal (kg*m^2)
+            recorder: Optional passive flight recorder
         """
         self.simulation_app = simulation_app
         self.dt = dt
         self.mass = mass
         self.arm_length = arm_length
         self.inertia = inertia
+        self.recorder = recorder
+        self._step_lock = threading.Lock()
+        self._recording_reset = False
 
         # State and threading
         self.state = DroneState()
@@ -186,15 +191,42 @@ class SimulationManager:
         if not self.simulation_app.is_running():
             return False
 
-        self._update_state()
-        self._process_commands()
-        force, torque = self._compute_control()
-        self._apply_control(force, torque)
-        self._update_frame_marker()
-        self.sim.step()
-
+        with self._step_lock:
+            self._update_state()
+            self._process_commands()
+            force, torque = self._compute_control()
+            self._record_control_sample()
+            self._apply_control(force, torque)
+            self._update_frame_marker()
+            self.sim.step()
 
         return True
+
+    def _record_control_sample(self):
+        if self.recorder is None or not self.recorder.enabled:
+            return
+        try:
+            if self._recording_reset:
+                self.recorder.split()
+                self._recording_reset = False
+            debug = self.controller.last_debug
+            mode = ControlMode(int(self.controller.control_mode[0].item())).name.lower()
+            values = []
+            for reference, measurement in (
+                ("attitude_desired", "attitude"), ("rate_desired", "rate_actual"),
+            ):
+                if reference == "attitude_desired" and mode == "attitude_rate":
+                    values.extend([None] * 6)
+                    continue
+                ref = debug[reference][0].detach().cpu().tolist()
+                meas = debug[measurement][0].detach().cpu().tolist()
+                if len(ref) != 3 or len(meas) != 3:
+                    raise ValueError(f"{reference}/{measurement} must contain three axes")
+                values.extend(value for pair in zip(ref, meas) for value in pair)
+            self.recorder.record(self.state.timestamp, mode, values)
+        except Exception as exc:
+            # Snapshot failures must not stop flight control or wait for the writer.
+            self.recorder._fail(f"controller snapshot failed: {exc}")
 
     def _update_state(self):
         """Read state from simulation."""
@@ -407,8 +439,28 @@ class SimulationManager:
         with self.state_lock:
             return asdict(self.state)
 
+    def get_recording_status(self):
+        return {
+            "service": "crazyflie_sim", "dt_s": self.dt,
+            "recording": self.recorder.status() if self.recorder is not None else None,
+        }
+
+    def read_recording(self, name):
+        """Expose only completed CSVs published by this recorder session."""
+        if self.recorder is None or name not in self.recorder.status()["completed"]:
+            raise FileNotFoundError("Completed recording not found")
+        path = self.recorder.directory / name
+        if path.is_symlink() or path.resolve().parent != self.recorder.directory:
+            raise ValueError("Invalid recording path")
+        return path.read_bytes()
+
     def reset(self):
         """Reset simulation and controller."""
+        with self._step_lock:
+            self._recording_reset = True
+            self._reset()
+
+    def _reset(self):
         # Clear command queue first to stop any ongoing commands
         while not self.cmd_queue.empty():
             try:

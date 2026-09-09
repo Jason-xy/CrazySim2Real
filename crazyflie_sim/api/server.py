@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
 from typing import Dict, Any
+from urllib.parse import parse_qs, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,20 @@ class SimulatorAPIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            if self.path == "/state":
+            location = urlsplit(self.path)
+            if location.path == "/recording/status":
+                self._send_json(self.simulation_manager.get_recording_status())
+            elif location.path == "/recording/file":
+                names = parse_qs(location.query).get("name", [])
+                if len(names) != 1:
+                    raise ValueError("A single recording name is required")
+                content = self.simulation_manager.read_recording(names[0])
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+            elif self.path == "/state":
                 self._send_json(self.simulation_manager.get_state())
             elif self.path == "/controller/params":
                 self._send_json(self.simulation_manager.get_controller_params())
@@ -51,6 +65,10 @@ class SimulatorAPIHandler(BaseHTTPRequestHandler):
                 self._send_json(self.simulation_manager.get_controller_debug())
             else:
                 self._send_json({"error": f"Not found: {self.path}"}, 404)
+        except FileNotFoundError as e:
+            self._send_json({"error": str(e)}, 404)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
         except Exception as e:
             logger.error(f"GET error: {e}")
             self._send_json({"error": str(e)}, 500)

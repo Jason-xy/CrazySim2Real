@@ -24,19 +24,49 @@ import math
 import enum
 import logging
 import argparse
+from pathlib import Path
+import shutil
 import threading
+import uuid
 from dataclasses import dataclass, field, replace
 from typing import Dict, Optional
 import requests
 import pygame
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] [%(levelname)s] %(message)s",
-    filename="xbox_client.log",
-    filemode="w",
-)
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from crazyflie_sim.flight_recorder import DEFAULT_LOG_DIR
+
 logger = logging.getLogger("xbox_client")
+
+
+def setup_logging(log_dir):
+    log_dir = Path(log_dir).resolve()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    destination = log_dir / "xbox_client.log"
+    sources = dict.fromkeys((
+        Path(__file__).resolve().with_name("xbox_client.log"),
+        Path.cwd() / "xbox_client.log",
+    ))
+    for source in sources:
+        if source.resolve() == destination.resolve() or not source.is_file():
+            continue
+        target = destination
+        while True:
+            try:
+                output = target.open("xb")
+                break
+            except FileExistsError:
+                target = log_dir / f"xbox_client_history_{uuid.uuid4().hex}.log"
+        # Keep the original unless the full copy has closed successfully.
+        with output, source.open("rb") as original:
+            shutil.copyfileobj(original, output)
+        source.unlink()
+    handler = logging.FileHandler(destination, mode="a", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    return handler
 
 # Constants
 DEFAULT_HOST = "localhost"
@@ -409,20 +439,20 @@ def main():
     parser = argparse.ArgumentParser(description="Xbox Controller for Crazyflie Simulator")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR, help="Runtime log directory")
     args = parser.parse_args()
 
-    controller = Controller()
-    network = NetworkThread(args.host, args.port, controller)
-    xbox = XboxHandler(controller, network)
-    display = Display()
-
-    if not xbox.init_joystick():
-        print("No Xbox controller found!")
-        sys.exit(1)
-
-    network.start()
-
+    handler = setup_logging(args.log_dir)
+    xbox = network = None
     try:
+        controller = Controller()
+        network = NetworkThread(args.host, args.port, controller)
+        xbox = XboxHandler(controller, network)
+        display = Display()
+        if not xbox.init_joystick():
+            print("No Xbox controller found!")
+            sys.exit(1)
+        network.start()
         while controller.running:
             t0 = time.time()
             xbox.update()
@@ -432,9 +462,15 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        xbox.stop()
-        network.stop()
-        print("\nExiting...")
+        try:
+            if xbox is not None:
+                xbox.stop()
+        finally:
+            if network is not None:
+                network.stop()
+            logger.removeHandler(handler)
+            handler.close()
+            print("\nExiting...")
 
 
 if __name__ == "__main__":
