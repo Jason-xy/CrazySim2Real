@@ -28,9 +28,14 @@ def parse_args(argv=None):
     parser.add_argument("--port", type=int, default=SERVER["port"], help="API port")
     parser.add_argument("--dt", type=float, default=SIM_DT, help="Time step (s)")
     parser.add_argument("--record", action="store_true", help="Record controller samples as CSV")
+    parser.add_argument("--render-interval", type=int, default=4, help="Physics steps per GUI frame (default: 4)")
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR, help="Text and flight log directory")
     AppLauncher.add_app_launcher_args(parser)
-    return parser.parse_args(argv)
+    parser.set_defaults(visualizer="kit")
+    args = parser.parse_args(argv)
+    if args.render_interval < 1:
+        parser.error("--render-interval must be positive")
+    return args
 
 running = True
 
@@ -85,7 +90,7 @@ def main():
         sim_manager = SimulationManager(
             simulation_app=simulation_app, dt=args.dt, mass=PHYSICS["mass"],
             arm_length=PHYSICS["arm_length"], inertia=tuple(PHYSICS["inertia"]),
-            recorder=recorder,
+            recorder=recorder, render_interval=args.render_interval,
         )
         api_server = SimulatorAPIServer(args.host, args.port, sim_manager)
         api_server.start()

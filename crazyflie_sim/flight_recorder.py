@@ -47,6 +47,7 @@ class FlightRecorder:
         self._last_time = None
         self._t0 = None
         self._split_pending = False
+        self._sealed = False
         self._completed = []
         self._thread = threading.Thread(target=self._write_loop, name="flight-recorder", daemon=True)
         self._thread.start()
@@ -61,7 +62,7 @@ class FlightRecorder:
             return {
                 "enabled": self.enabled, "error": self.error, "session": self._session,
                 "mode": self._mode, "segment_start": self._t0, "last_time": self._last_time,
-                "current_file": self._filename(self._part, self._mode) if self._part else None,
+                "current_file": self._filename(self._part, self._mode) if self._part and not self._sealed else None,
                 "completed": list(self._completed),
             }
 
@@ -112,6 +113,7 @@ class FlightRecorder:
                     self._t0 = sim_time
                     self._mode = mode
                     self._split_pending = False
+                    self._sealed = False
                 row = (sim_time - self._t0, *snapshot)
                 self._queue.put_nowait((self._part, mode, row))
                 self._last_time = sim_time
@@ -122,10 +124,16 @@ class FlightRecorder:
                 self._fail(f"cannot capture controller sample: {exc}")
             return False
 
-    def split(self):
-        """Start another file at the next accepted sample, even if time is unchanged."""
+    def split(self, finalize=False):
+        """Optionally seal now, without waiting for a sample, mode change or disk I/O."""
         with self._input_lock:
             self._split_pending = True
+            if finalize and not self._sealed:
+                try:
+                    self._queue.put_nowait((None, None, None))
+                    self._sealed = True
+                except queue.Full:
+                    self._fail("recording queue full; cannot seal segment")
 
     def close(self, success=True):
         """Drain accepted rows and join the worker. Repeated calls are harmless."""
@@ -161,6 +169,12 @@ class FlightRecorder:
                     item = None
                 if item is not None:
                     part, mode, row = item
+                    if row is None:
+                        if stream is not None:
+                            previous, stream = stream, None
+                            self._finish_file(previous, partial)
+                        writer = current_part = None
+                        continue
                     if part != current_part:
                         if stream is not None:
                             previous, stream = stream, None

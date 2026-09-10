@@ -84,6 +84,7 @@ x-default-isaac-lab-environment: &default-isaac-lab-environment
   - DISPLAY=${DISPLAY}
   - TERM
   - QT_X11_NO_MITSHM=1
+  - PYTHONDONTWRITEBYTECODE=1
 
 x-default-isaac-lab-deploy: &default-isaac-lab-deploy
   resources:
@@ -105,7 +106,7 @@ services:
         - ISAACSIM_ROOT_PATH_ARG=${DOCKER_ISAACSIM_ROOT_PATH}
         - ISAACLAB_PATH_ARG=${DOCKER_ISAACLAB_PATH}
         - DOCKER_USER_HOME_ARG=${DOCKER_USER_HOME}
-    image: isaac-lab-crazyesim2real
+    image: ${ISAACLAB_IMAGE}
     environment: *default-isaac-lab-environment
     volumes: *default-isaac-lab-volumes
     privileged: true
@@ -118,6 +119,7 @@ services:
     entrypoint: ${ENTRYPOINT:-bash}
     stdin_open: true
     tty: true
+    stop_grace_period: 60s
 
 volumes:
   # isaac-sim

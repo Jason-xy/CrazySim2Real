@@ -72,6 +72,13 @@ CrazySim2Real/
 
 The simulator runs in a Docker container with NVIDIA Isaac Lab:
 
+The supported pair is Isaac Lab `v3.0.0-beta2.patch1` and Isaac Sim `6.0.1`.
+All project quaternion arrays use XYZW; control/API Euler angles are unchanged.
+The launcher reuses `crazyrl-isaaclab:3.0.0-beta2.patch1`, shared with CrazyE2E /
+crazy_rl-ctbr, and builds it only if missing. It defaults to GUI. Use `--viz none`
+for unattended recording. See [simulator documentation](crazyflie_sim/README.md)
+for recording, automatic acquisition, and explicit real-SDK checks.
+
 ```bash
 # Start the simulator
 ./scripts/start.sh /workspace/isaaclab/CrazySim2Real/crazyflie_sim/run.py

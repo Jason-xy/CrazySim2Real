@@ -7,9 +7,10 @@
 # Please check above link for license information.
 
 # Base image
-ARG ISAACSIM_BASE_IMAGE_ARG
-ARG ISAACSIM_VERSION_ARG
+ARG ISAACSIM_BASE_IMAGE_ARG=nvcr.io/nvidia/isaac-sim
+ARG ISAACSIM_VERSION_ARG=6.0.1
 FROM ${ISAACSIM_BASE_IMAGE_ARG}:${ISAACSIM_VERSION_ARG} AS base
+ARG ISAACSIM_VERSION_ARG
 ENV ISAACSIM_VERSION=${ISAACSIM_VERSION_ARG}
 
 # Set default RUN shell to bash
@@ -29,6 +30,7 @@ ENV ISAACLAB_PATH=${ISAACLAB_PATH_ARG}
 # Home dir of docker user, typically '/root'
 ARG DOCKER_USER_HOME_ARG
 ENV DOCKER_USER_HOME=${DOCKER_USER_HOME_ARG}
+ENV HOME=${DOCKER_USER_HOME_ARG}
 
 # Set environment variables
 ENV LANG=C.UTF-8
@@ -86,16 +88,16 @@ RUN touch /bin/nvidia-smi && \
 # installing Isaac Lab dependencies
 # use pip caching to avoid reinstalling large packages
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
-    ${ISAACLAB_PATH}/isaaclab.sh --install
+    ${ISAACLAB_PATH}/isaaclab.sh --install 'rl[rsl-rl]'
 
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install \
-    pynput
+    pynput \
+    debugpy \
+    rtree
 
-# Install newest version pytorch
-RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
-    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 || true
+RUN ${ISAACLAB_PATH}/isaaclab.sh -p -c \
+    "import importlib.metadata as m, pathlib, rsl_rl; assert m.version('rsl-rl-lib') == '5.0.1'; assert 'site-packages' in str(pathlib.Path(rsl_rl.__file__).resolve()); print(rsl_rl.__file__)"
 
 # aliasing isaaclab.sh and python for convenience
 RUN echo "export ISAACLAB_PATH=${ISAACLAB_PATH}" >> ${HOME}/.bashrc && \

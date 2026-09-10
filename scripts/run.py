@@ -6,7 +6,23 @@ import subprocess
 import argparse
 import time
 from pathlib import Path
-import re
+import shlex
+
+
+def resolve_visualizer(arguments):
+    """Resolve wrapper aliases once, preserving all target argument ordering."""
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--gui", action="store_true")
+    parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--viz", "--visualizer", action="append", default=[])
+    args, remaining = parser.parse_known_args(arguments)
+    if int(args.gui) + int(args.headless) + len(args.viz) > 1:
+        raise ValueError("Use only one of --gui, --headless, or --viz/--visualizer")
+    visualizer = args.viz[0] if args.viz else ("none" if args.headless else "kit")
+    names = visualizer.split(",")
+    if any(not name.strip() for name in names) or ("none" in names and len(names) != 1):
+        raise ValueError("Invalid visualizer list")
+    return remaining, visualizer
 
 def setup_environment():
     """Set up the environment variables and paths"""
@@ -119,16 +135,8 @@ def select_gpu(requested_gpus):
             print("No GPU became available after waiting. Proceeding without specific GPU selection.")
             return None
 
-def run_isaac_lab(script_dir, target_script, script_args, gui, gpus):
+def run_isaac_lab(script_dir, target_script, script_args, visualizer, gpus):
     """Run the target script with Isaac Lab"""
-    isaaclab_sh = script_dir.parent.parent / "isaaclab.sh"
-    headless_args = ["--headless", "--livestream", "2"]
-    gui = True  # Force GUI mode for now
-    # headless_args = ["--headless"]
-    if gui:
-        headless_args = []
-    else:
-        os.environ["DISPLAY"] = ":0"
 
     # Apply GPU selection logic
     selected_gpus = select_gpu(gpus)
@@ -138,20 +146,15 @@ def run_isaac_lab(script_dir, target_script, script_args, gui, gpus):
 
     # Build command
     cmd = [
-        str(isaaclab_sh),
-        "-p",
+        sys.executable,
         target_script,
         *script_args,
-        *headless_args,
-        "--enable_camera",
-        "--kit_args",
-        # "--enable isaacsim.asset.gen.omap", # Do not split this line
-        "--enable omni.kit.livestream.webrtc --enable isaacsim.asset.gen.omap", # Do not split this line
+        "--viz", visualizer,
     ]
 
-    print(f"Running command: {' '.join(cmd)}")
+    print(f"Running command: {shlex.join(cmd)}", flush=True)
     try:
-        subprocess.run(cmd, check=True, env=os.environ)
+        os.execv(sys.executable, cmd)
     except subprocess.CalledProcessError as e:
         print(f"Error running command: {e}")
         sys.exit(1)
@@ -160,12 +163,12 @@ def run_isaac_lab(script_dir, target_script, script_args, gui, gpus):
         sys.exit(0)
 
 def main():
-    parser = argparse.ArgumentParser(description="Run script with Isaac Lab")
-    parser.add_argument("--gui", action="store_true", help="Run with GUI")
+    parser = argparse.ArgumentParser(
+        description="Run with Isaac Lab 3. Defaults to --viz kit; --gui is an alias, --headless means --viz none.",
+        allow_abbrev=False,
+    )
     parser.add_argument("--gpus", type=str, help="Comma-separated list of GPU indices to use")
     parser.add_argument("target_script", help="Path to the target script to run")
-    parser.add_argument("script_args", nargs="*",
-                        help="Arguments to pass to the target script")
 
     # Handle script arguments that might be confused with this script's arguments
     if len(sys.argv) > 1 and sys.argv[1] == '--help':
@@ -177,10 +180,14 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    args, unknown = parser.parse_known_args()
-
-    # Combine explicitly parsed arguments with any unknown arguments
-    all_script_args = args.script_args + unknown
+    try:
+        if len(sys.argv) > 1 and sys.argv[1] == "--print-viz":
+            print(resolve_visualizer(sys.argv[2:])[1])
+            return
+        remaining, visualizer = resolve_visualizer(sys.argv[1:])
+    except ValueError as exc:
+        parser.error(str(exc))
+    args, all_script_args = parser.parse_known_args(remaining)
 
     script_dir = setup_environment()
 
@@ -188,7 +195,7 @@ def main():
     if not check_target_script(target_script):
         sys.exit(1)
 
-    run_isaac_lab(script_dir, target_script, all_script_args, args.gui, args.gpus)
+    run_isaac_lab(script_dir, target_script, all_script_args, visualizer, args.gpus)
 
 if __name__ == "__main__":
     main()

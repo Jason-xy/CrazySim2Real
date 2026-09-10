@@ -1,8 +1,9 @@
 #!/bin/bash
+set -euo pipefail
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # Check if running inside Docker (use HOST_BASE_DIR if available)
-if [ -n "$HOST_BASE_DIR" ]; then
+if [ -n "${HOST_BASE_DIR:-}" ]; then
     # Remove the first-level directory from SCRIPT_DIR
     echo "Running inside Docker, using HOST_BASE_DIR: $HOST_BASE_DIR"
     SCRIPT_DIR_NO_FIRST=$(echo "$(dirname "$SCRIPT_DIR")" | cut -d'/' -f3-)
@@ -15,8 +16,11 @@ fi
 
 # Generate a unique project name based on the current timestamp
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
-PROJECT_NAME="isaaclab_${TIMESTAMP}"
+PROJECT_NAME="isaaclab_${TIMESTAMP}_$$"
 DOCKER_COMPOSE_FILE="$(dirname "$SCRIPT_DIR")/docker/isaaclab/docker-compose.yml"
+COMPOSE=(docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME")
+XHOST_ADDED=false
+CONTAINER_STARTED=false
 
 # Create shared volumes if they don't exist yet
 create_shared_volumes() {
@@ -63,13 +67,18 @@ create_shared_volumes() {
 
 # Function to clean up containers when script exits
 cleanup() {
-    echo "Cleaning up container: $PROJECT_NAME"
-    docker compose -f $DOCKER_COMPOSE_FILE -p $PROJECT_NAME down
-    echo "Container cleaned up successfully."
+    if $CONTAINER_STARTED; then
+        "${COMPOSE[@]}" down --remove-orphans || true
+    fi
+    if $XHOST_ADDED; then
+        xhost -si:localuser:root >/dev/null || true
+    fi
 }
 
 # Register the cleanup function to run on script exit
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Display help message
 show_help() {
@@ -96,7 +105,7 @@ show_help() {
 stop_all_containers() {
     echo "Stopping all isaaclab containers..."
     # Find all project names starting with isaaclab_
-    PROJECTS=$(docker compose ls --format "{{.Project}}" | grep "^isaaclab_")
+    PROJECTS=$(docker compose ls --format "{{.Project}}" | grep "^isaaclab_" || true)
     
     if [ -z "$PROJECTS" ]; then
         echo "No running isaaclab containers found."
@@ -113,29 +122,52 @@ stop_all_containers() {
 }
 
 # Check for help option or stop-all command
-if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     show_help
-elif [ "$1" = "--stop-all" ]; then
+elif [ "${1:-}" = "--stop-all" ]; then
     stop_all_containers
 fi
 
-# Create shared volumes if needed
-create_shared_volumes
-
-# Check if arguments are provided for the entrypoint
-if [ $# -ge 1 ]; then
-    # Join all arguments into a single string to use as ENTRYPOINT
-    ENTRYPOINT_CMD="/bin/bash -c \"source ~/.bashrc && /workspace/isaaclab/_isaac_sim/python.sh /workspace/isaaclab/CrazySim2Real/scripts/run.py $*\""
-    export ENTRYPOINT="$ENTRYPOINT_CMD"
-    echo "Setting ENTRYPOINT to: $ENTRYPOINT"
-else
-    # If no arguments provided, don't set ENTRYPOINT (container will use default)
-    echo "No ENTRYPOINT specified. Container will use default entrypoint."
+# Keep mounted source aligned with the shared runtime release.
+EXPECTED=ffff603eafc6b74264a5261cc0183d6a65390d78
+export ISAACLAB_IMAGE=crazyrl-isaaclab:3.0.0-beta2.patch1
+export ISAACSIM_VERSION=6.0.1
+LAB_DIR="$(dirname "$SCRIPT_DIR")/docker/isaaclab/IsaacLab"
+if [ "$(git -C "$LAB_DIR" rev-parse HEAD)" != "$EXPECTED" ]; then
+    echo "Isaac Lab must be checked out at v3.0.0-beta2.patch1 ($EXPECTED)." >&2
+    exit 1
+fi
+if [ -n "$(git -C "$LAB_DIR" status --porcelain --untracked-files=no)" ]; then
+    echo "Isaac Lab has local source changes; refusing to label them as the pinned release." >&2
+    exit 1
+fi
+VIZ=$(python3 "$SCRIPT_DIR/run.py" --print-viz "$@")
+if [[ ",$VIZ," == *",kit,"* ]]; then
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "GUI needs DISPLAY. For automatic recording pass --viz none." >&2
+        exit 1
+    fi
+    XHOST_STATE=$(xhost)
+    if ! grep -qi 'access control disabled' <<< "$XHOST_STATE" &&
+       ! grep -qi 'SI:localuser:root' <<< "$XHOST_STATE"; then
+        xhost +si:localuser:root
+        XHOST_ADDED=true
+    fi
 fi
 
-xhost +
-mkdir -p $BASE_DIR/logs
+create_shared_volumes
+mkdir -p "$BASE_DIR/logs"
+# Reuse the CrazyE2E image without rebuilding its shared tag on every launch.
+if ! docker image inspect "$ISAACLAB_IMAGE" >/dev/null 2>&1; then
+    "${COMPOSE[@]}" build crazyesim2real
+fi
 echo "Starting new container with project name: $PROJECT_NAME"
-# Use --detach to run in background, script will wait and clean up when done
-docker compose -f $DOCKER_COMPOSE_FILE -p $PROJECT_NAME up
-# The cleanup function will be called automatically when the script exits
+CONTAINER_STARTED=true
+if [ $# -gt 0 ]; then
+    "${COMPOSE[@]}" run --rm -T --name "${PROJECT_NAME}-sim" \
+        --entrypoint /bin/bash crazyesim2real \
+        /workspace/isaaclab/CrazySim2Real/scripts/isaac_python.sh \
+        /workspace/isaaclab/CrazySim2Real/scripts/run.py "$@"
+else
+    "${COMPOSE[@]}" run --rm --name "${PROJECT_NAME}-sim" --entrypoint bash crazyesim2real
+fi

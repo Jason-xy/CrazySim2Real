@@ -21,11 +21,15 @@ from isaaclab.sim import SimulationContext
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaacsim.core.utils.prims import set_prim_property
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
+from isaaclab.sim.utils.prims import add_usd_reference, change_prim_property, set_prim_visibility
+from isaaclab.sim.utils.stage import get_current_stage
+from isaaclab_physx.physics import PhysxCfg
+from pxr import Gf, Sdf
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import euler_xyz_from_quat, matrix_from_quat
-from isaacsim.core.utils.stage import add_reference_to_stage
 from isaaclab_assets import CRAZYFLIE_CFG
+from crazyflie_sim.contact_monitor import ContactMonitor
 
 from crazyflie_sim.controllers.cf_controller import (
     CrazyflieController,
@@ -51,6 +55,7 @@ class DroneState:
     orientation: Dict[str, float] = None  # roll, pitch, yaw in degrees
     angular_velocity: Dict[str, float] = None  # deg/s
     timestamp: float = 0.0
+    ground_contact: Dict[str, Any] = None
 
     def __post_init__(self):
         if self.position is None:
@@ -81,6 +86,7 @@ class SimulationManager:
         arm_length: float = cf_config.ARM_LENGTH,
         inertia: tuple = (cf_config.INERTIA_XX, cf_config.INERTIA_YY, cf_config.INERTIA_ZZ),
         recorder=None,
+        render_interval: int = 4,
     ):
         """
         Initialize simulation manager.
@@ -92,6 +98,7 @@ class SimulationManager:
             arm_length: Motor arm length (m) - default CF2.1 BL
             inertia: Inertia tensor diagonal (kg*m^2)
             recorder: Optional passive flight recorder
+            render_interval: Physics steps per GUI frame; control/recording remain per step
         """
         self.simulation_app = simulation_app
         self.dt = dt
@@ -99,8 +106,13 @@ class SimulationManager:
         self.arm_length = arm_length
         self.inertia = inertia
         self.recorder = recorder
+        if isinstance(render_interval, bool) or not isinstance(render_interval, int) or render_interval < 1:
+            raise ValueError("render_interval must be a positive integer")
+        self.render_interval = render_interval
         self._step_lock = threading.Lock()
         self._recording_reset = False
+        self.contact_monitor = ContactMonitor()
+        self._suppress_contact_until = 0
 
         # State and threading
         self.state = DroneState()
@@ -125,15 +137,23 @@ class SimulationManager:
 
     def _setup_simulation(self):
         """Initialize IsaacLab simulation environment."""
-        self.sim = SimulationContext(sim_utils.SimulationCfg(dt=self.dt))
+        self.sim = SimulationContext(sim_utils.SimulationCfg(
+            dt=self.dt, device=str(self.device), physics=PhysxCfg(), render_interval=self.render_interval,
+        ))
 
         # Ground plane
         ground_path = f"{ISAAC_NUCLEUS_DIR}/Environments/Grid/default_environment.usd"
-        add_reference_to_stage(ground_path, "/World/Environment/Ground")
+        add_usd_reference(prim_path="/World/Environment/Ground", usd_path=ground_path)
 
         # Robot
         robot_cfg = CRAZYFLIE_CFG.replace(prim_path="/World/Robot")
+        robot_cfg.spawn.activate_contact_sensors = True
         self.robot = Articulation(robot_cfg)
+        self.contact_sensor = ContactSensor(ContactSensorCfg(
+            prim_path="/World/Robot/.*", update_period=0.0, history_length=0,
+        ))
+        set_prim_visibility(get_current_stage().GetPrimAtPath("/World/Robot"), True)
+        self.sim.set_camera_view((1.5, 1.5, 1.2), (0.0, 0.0, 0.5))
 
         # Body frame coordinate axes visualization
         # Scale appropriate for Crazyflie (arm length ~5cm)
@@ -151,23 +171,43 @@ class SimulationManager:
         )
 
         # Apply physics parameters before reset
-        set_prim_property("/World/Robot/body", "physics:mass", self.mass)
-        set_prim_property("/World/Robot/body", "physics:diagonalInertia", self.inertia)
+        change_prim_property(
+            "/World/Robot/body.physics:mass", self.mass,
+            type_to_create_if_not_exist=Sdf.ValueTypeNames.Float,
+        )
+        change_prim_property(
+            "/World/Robot/body.physics:diagonalInertia", Gf.Vec3f(*self.inertia),
+            type_to_create_if_not_exist=Sdf.ValueTypeNames.Float3,
+        )
         logger.info(f"Physics parameters set: mass={self.mass}kg, inertia={self.inertia}")
 
         # Reset and initialize
         self.sim.reset()
 
-        joint_pos, joint_vel = self.robot.data.default_joint_pos, self.robot.data.default_joint_vel
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
+        self.body_ids = self.robot.find_bodies("body")[0]
+        self.robot.write_joint_state_to_sim_index(
+            position=self.robot.data.default_joint_pos.torch.clone(),
+            velocity=self.robot.data.default_joint_vel.torch.clone(),
+        )
 
         # Start at 10cm above ground
-        default_root = self.robot.data.default_root_state.clone()
-        default_root[:, 2] = 0.1
-        self.robot.write_root_pose_to_sim(default_root[:, :7])
-        self.robot.write_root_velocity_to_sim(default_root[:, 7:])
+        pose = self.robot.data.default_root_pose.torch.clone()
+        pose[:, 2] = 0.1
+        pose[:, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+        self.robot.write_root_link_pose_to_sim_index(root_pose=pose)
+        self.robot.write_root_com_velocity_to_sim_index(
+            root_velocity=self.robot.data.default_root_vel.torch.clone(),
+        )
+        actual_mass = self.robot.data.body_mass.torch[0, self.body_ids[0]].item()
+        self.total_mass = self.robot.data.body_mass.torch[0].sum().item()
+        actual_inertia = self.robot.data.body_inertia.torch[0, self.body_ids[0]].reshape(3, 3)
+        diagonal = actual_inertia.diagonal().cpu().numpy()
+        if not np.isclose(actual_mass, self.mass, rtol=1e-4) or not np.allclose(
+            diagonal, self.inertia, rtol=1e-4, atol=1e-10,
+        ):
+            raise RuntimeError(f"Physics parameter mismatch: mass={actual_mass}, inertia={diagonal}")
+        logger.info("Verified PhysX body mass=%s kg, inertia=%s kg*m^2", actual_mass, diagonal.tolist())
 
-        set_prim_property("/World/Robot", "visibility", "visible")
         logger.info("Simulation environment initialized")
 
     def _setup_controller(self):
@@ -197,8 +237,12 @@ class SimulationManager:
             force, torque = self._compute_control()
             self._record_control_sample()
             self._apply_control(force, torque)
-            self._update_frame_marker()
-            self.sim.step()
+            render = self.sim.is_rendering and (
+                (self.sim.get_physics_step_count() + 1) % self.render_interval == 0
+            )
+            if render:
+                self._update_frame_marker()
+            self.sim.step(render=render)
 
         return True
 
@@ -230,18 +274,27 @@ class SimulationManager:
 
     def _update_state(self):
         """Read state from simulation."""
+        with self.state_lock:
+            previous_state = {
+                "position": dict(self.state.position), "velocity": dict(self.state.velocity),
+                "orientation": dict(self.state.orientation),
+                "angular_velocity": dict(self.state.angular_velocity),
+                "timestamp": self.state.timestamp,
+            }
         self.robot.update(self.dt)
-        root_state = self.robot.data.root_state_w
+        self.contact_sensor.update(self.dt, force_recompute=True)
+        pose = self.robot.data.root_link_pose_w.torch
+        velocity = self.robot.data.root_com_vel_w.torch
 
         # Position
         pos = {
-            "x": root_state[0, 0].item(),
-            "y": root_state[0, 1].item(),
-            "z": root_state[0, 2].item(),
+            "x": pose[0, 0].item(),
+            "y": pose[0, 1].item(),
+            "z": pose[0, 2].item(),
         }
 
-        # Quaternion (w, x, y, z) -> Euler angles using isaaclab util
-        quat = root_state[0, 3:7].unsqueeze(0)
+        # XYZW body-to-world quaternion, matching Isaac Lab 3.
+        quat = pose[:, 3:7]
         roll, pitch, yaw = euler_xyz_from_quat(quat)
         angles = torch.stack((roll, pitch, yaw), dim=-1).squeeze(0)
         # Wrap to [-pi, pi]
@@ -254,15 +307,15 @@ class SimulationManager:
 
         # Velocity (world frame)
         vel = {
-            "x": root_state[0, 7].item(),
-            "y": root_state[0, 8].item(),
-            "z": root_state[0, 9].item(),
+            "x": velocity[0, 0].item(),
+            "y": velocity[0, 1].item(),
+            "z": velocity[0, 2].item(),
         }
 
         # Angular velocity - convert from world frame to body frame
         # The Crazyflie firmware expects body-frame angular velocity (gyro output)
         # ω_body = R^T * ω_world, where R is the rotation matrix from body to world
-        omega_world = root_state[0, 10:13]
+        omega_world = velocity[0, 3:6]
 
         # Rotation matrix from quaternion (body to world) from isaaclab util
         rotation_matrix = matrix_from_quat(quat)[0]
@@ -282,7 +335,12 @@ class SimulationManager:
             self.state.velocity = vel
             self.state.orientation = orient
             self.state.angular_velocity = ang_vel
-            self.state.timestamp = self.sim.current_time
+            self.state.timestamp = self.sim.get_physics_step_count() * self.dt
+            forces = self.contact_sensor.data.net_forces_w.torch
+            active = bool((torch.linalg.vector_norm(forces, dim=-1) > 0.001).any().item())
+            if self.sim.get_physics_step_count() >= self._suppress_contact_until:
+                self.contact_monitor.update(active, self.state.timestamp, previous_state, {"position": pos})
+            self.state.ground_contact = self.contact_monitor.status()
 
     def _process_commands(self):
         """Process queued commands."""
@@ -361,8 +419,9 @@ class SimulationManager:
         forces[0, 0, :] = force[0, :]
         torques[0, 0, :] = torque[0, :]
 
-        body_id = self.robot.find_bodies("body")[0]
-        self.robot.set_external_force_and_torque(forces, torques, body_ids=body_id)
+        self.robot.permanent_wrench_composer.set_forces_and_torques_index(
+            forces=forces, torques=torques, body_ids=self.body_ids, is_global=False,
+        )
 
         # Update propeller velocities based on motor thrust
         # Motor thrust is stored in controller's power_distribution
@@ -392,17 +451,13 @@ class SimulationManager:
         joint_vel[0, 3] = -omega[3]  # m4_joint (CCW)
 
         # Keep current joint positions (propellers just spin)
-        joint_pos = self.robot.data.joint_pos.clone()
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
+        joint_pos = self.robot.data.joint_pos.torch.clone()
+        self.robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel)
 
     def _update_frame_marker(self):
         """Update body frame visualization marker."""
-        root_state = self.robot.data.root_state_w
-        # Position
-        pos = root_state[0, :3].cpu().numpy().reshape(1, 3)
-        # Orientation (w, x, y, z)
-        quat = root_state[0, 3:7].cpu().numpy().reshape(1, 4)
-        self.frame_marker.visualize(translations=pos, orientations=quat)
+        pose = self.robot.data.root_link_pose_w.torch
+        self.frame_marker.visualize(translations=pose[:, :3], orientations=pose[:, 3:7])
 
     # --- Public API ---
 
@@ -442,8 +497,18 @@ class SimulationManager:
     def get_recording_status(self):
         return {
             "service": "crazyflie_sim", "dt_s": self.dt,
+            "capabilities": ["contact_events", "recording_split"],
             "recording": self.recorder.status() if self.recorder is not None else None,
         }
+
+    def split_recording(self):
+        """Seal the current segment without changing control or blocking on disk."""
+        with self._step_lock:
+            if self.recorder is None or not self.recorder.enabled:
+                raise ValueError("Recording is unavailable")
+            previous = self.recorder.status()["current_file"]
+            self.recorder.split(finalize=True)
+            return {"previous_file": previous, "recording": self.recorder.status()}
 
     def read_recording(self, name):
         """Expose only completed CSVs published by this recorder session."""
@@ -475,35 +540,34 @@ class SimulationManager:
         self.attitude_setpoint = {"roll": 0.0, "pitch": 0.0, "yaw_rate": 0.0, "thrust": 0.0}
 
         # Clear external forces
-        body_id = self.robot.find_bodies("body")[0]
+        self.robot.permanent_wrench_composer.reset()
+        self.robot.instantaneous_wrench_composer.reset()
         zero_force = torch.zeros((1, 1, 3), device=self.device)
-        self.robot.set_external_force_and_torque(zero_force, zero_force, body_ids=body_id)
+        self.robot.permanent_wrench_composer.set_forces_and_torques_index(
+            forces=zero_force, torques=zero_force, body_ids=self.body_ids, is_global=False,
+        )
         self.robot.write_data_to_sim()
 
         # Reset robot to initial pose
-        root_state = torch.zeros((1, 13), device=self.device)
-        root_state[:, 0] = 0.0   # x
-        root_state[:, 1] = 0.0   # y
-        root_state[:, 2] = 0.1   # z
-        root_state[:, 3] = 1.0   # qw (identity quaternion)
-        root_state[:, 4] = 0.0   # qx
-        root_state[:, 5] = 0.0   # qy
-        root_state[:, 6] = 0.0   # qz
-        # velocity already zero
-
-        self.robot.write_root_pose_to_sim(root_state[:, :7])
-        self.robot.write_root_velocity_to_sim(root_state[:, 7:])
+        pose = torch.tensor([[0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 1.0]], device=self.device)
+        self.robot.write_root_link_pose_to_sim_index(root_pose=pose)
+        self.robot.write_root_com_velocity_to_sim_index(
+            root_velocity=torch.zeros((1, 6), device=self.device),
+        )
 
         # Reset joint states
-        joint_pos = self.robot.data.default_joint_pos.clone()
+        joint_pos = self.robot.data.default_joint_pos.torch.clone()
         joint_vel = torch.zeros_like(joint_pos)
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
+        self.robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel)
 
         self.robot.write_data_to_sim()
 
         # Update robot data
         self.robot.update(self.dt)
-
+        self.contact_sensor.reset()
+        self.contact_monitor.reset()
+        # PhysX contact buffers still describe the pre-reset step until physics advances.
+        self._suppress_contact_until = self.sim.get_physics_step_count() + 1
 
         # Update internal state
         self._update_state()
@@ -519,6 +583,7 @@ class SimulationManager:
         """Get controller parameters for debugging."""
         return {
             "mass": self.mass,
+            "total_mass": self.total_mass,
             "arm_length": self.arm_length,
             "inertia": self.inertia,
             "thrust_max": cf_config.THRUST_MAX,
@@ -618,7 +683,7 @@ class SimulationManager:
             "position": to_list(dbg.get("position")),
             "velocity_setpoint": to_list(dbg.get("velocity_setpoint")),
             "velocity": to_list(dbg.get("velocity")),
-            "timestamp": self.sim.current_time,
+            "timestamp": self.state.timestamp,
         }
 
     def update_controller_params(self, params: Dict[str, Any]):

@@ -75,7 +75,10 @@ class SimulatorAPIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            if self.path == "/control/position":
+            if self.path == "/recording/split":
+                self._read_json()
+                self._send_json(self.simulation_manager.split_recording())
+            elif self.path == "/control/position":
                 data = self._read_json()
                 self.simulation_manager.enqueue_position_cmd(
                     data.get("x", 0.0),
