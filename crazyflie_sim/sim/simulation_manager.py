@@ -580,80 +580,36 @@ class SimulationManager:
         logger.info("Simulation reset")
 
     def get_controller_params(self) -> Dict[str, Any]:
-        """Get controller parameters for debugging."""
-        return {
-            "mass": self.mass,
-            "total_mass": self.total_mass,
-            "arm_length": self.arm_length,
-            "inertia": self.inertia,
-            "thrust_max": cf_config.THRUST_MAX,
-            "roll_rate": {
-                "kp": cf_config.PID_ROLL_RATE_KP,
-                "ki": cf_config.PID_ROLL_RATE_KI,
-                "kd": cf_config.PID_ROLL_RATE_KD,
-                "i_limit": cf_config.PID_ROLL_RATE_INTEGRATION_LIMIT,
-            },
-            "roll": {
-                "kp": cf_config.PID_ROLL_KP,
-                "ki": cf_config.PID_ROLL_KI,
-                "kd": cf_config.PID_ROLL_KD,
-                "i_limit": cf_config.PID_ROLL_INTEGRATION_LIMIT,
-            },
-            "pitch_rate": {
-                "kp": cf_config.PID_PITCH_RATE_KP,
-                "ki": cf_config.PID_PITCH_RATE_KI,
-                "kd": cf_config.PID_PITCH_RATE_KD,
-                "i_limit": cf_config.PID_PITCH_RATE_INTEGRATION_LIMIT,
-            },
-            "pitch": {
-                "kp": cf_config.PID_PITCH_KP,
-                "ki": cf_config.PID_PITCH_KI,
-                "kd": cf_config.PID_PITCH_KD,
-                "i_limit": cf_config.PID_PITCH_INTEGRATION_LIMIT,
-            },
-            "yaw_rate": {
-                "kp": cf_config.PID_YAW_RATE_KP,
-                "ki": cf_config.PID_YAW_RATE_KI,
-                "kd": cf_config.PID_YAW_RATE_KD,
-                "i_limit": cf_config.PID_YAW_RATE_INTEGRATION_LIMIT,
-            },
-            "yaw": {
-                "kp": cf_config.PID_YAW_KP,
-                "ki": cf_config.PID_YAW_KI,
-                "kd": cf_config.PID_YAW_KD,
-                "i_limit": cf_config.PID_YAW_INTEGRATION_LIMIT,
-            },
-            "pos_x": {
-                "kp": cf_config.PID_POS_X_KP,
-                "ki": cf_config.PID_POS_X_KI,
-                "kd": cf_config.PID_POS_X_KD,
-            },
-            "pos_y": {
-                "kp": cf_config.PID_POS_Y_KP,
-                "ki": cf_config.PID_POS_Y_KI,
-                "kd": cf_config.PID_POS_Y_KD,
-            },
-            "pos_z": {
-                "kp": cf_config.PID_POS_Z_KP,
-                "ki": cf_config.PID_POS_Z_KI,
-                "kd": cf_config.PID_POS_Z_KD,
-            },
-            "vel_x": {
-                "kp": cf_config.PID_VEL_X_KP,
-                "ki": cf_config.PID_VEL_X_KI,
-                "kd": cf_config.PID_VEL_X_KD,
-            },
-            "vel_y": {
-                "kp": cf_config.PID_VEL_Y_KP,
-                "ki": cf_config.PID_VEL_Y_KI,
-                "kd": cf_config.PID_VEL_Y_KD,
-            },
-            "vel_z": {
-                "kp": cf_config.PID_VEL_Z_KP,
-                "ki": cf_config.PID_VEL_Z_KI,
-                "kd": cf_config.PID_VEL_Z_KD,
-            },
-        }
+        """Snapshot active gains, including changes made through the HTTP API."""
+        with self._step_lock:
+            attitude = self.controller.attitude_controller
+            position = self.controller.position_controller
+            result = {
+                "mass": self.mass,
+                "total_mass": self.total_mass,
+                "arm_length": self.arm_length,
+                "inertia": self.inertia,
+                "thrust_max": self.controller.power_distribution.thrust_max,
+            }
+            for name, pid in (
+                ("roll_rate", attitude.pid_roll_rate),
+                ("roll", attitude.pid_roll),
+                ("pitch_rate", attitude.pid_pitch_rate),
+                ("pitch", attitude.pid_pitch),
+                ("yaw_rate", attitude.pid_yaw_rate),
+                ("yaw", attitude.pid_yaw),
+                ("pos_x", position.pid_x),
+                ("pos_y", position.pid_y),
+                ("pos_z", position.pid_z),
+                ("vel_x", position.pid_vx),
+                ("vel_y", position.pid_vy),
+                ("vel_z", position.pid_vz),
+            ):
+                result[name] = {key: getattr(pid, key) for key in ("kp", "ki", "kd")}
+                # Preserve the existing API shape for outer-loop parameters.
+                if name in ("roll_rate", "roll", "pitch_rate", "pitch", "yaw_rate", "yaw"):
+                    result[name]["i_limit"] = pid.i_limit
+            return result
 
     def get_controller_debug(self) -> Dict[str, Any]:
         """Get latest controller debug telemetry."""
@@ -689,7 +645,8 @@ class SimulationManager:
     def update_controller_params(self, params: Dict[str, Any]):
         """Update controller gains at runtime."""
         try:
-            self.controller.set_gains(params)
+            with self._step_lock:
+                self.controller.set_gains(params)
         except Exception as e:
             logger.error(f"Failed to update controller params: {e}")
             raise
